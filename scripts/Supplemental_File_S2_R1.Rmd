@@ -1,0 +1,3234 @@
+---
+title: "Do Correctional Facilities Correct Our Youth?: Effects of Incarceration and Court-Ordered Community Service on Personality Development"
+date: "`r Sys.setlocale('LC_TIME', 'C'); format(Sys.time(), '%d\\\\. %B %Y')`"
+author: 
+  - "Kathryn L. Bollich-Ziegler"
+  - "Emorie D. Beck"
+  - "Patrick L. Hill"
+  - "Joshua J. Jackson"
+output:
+  html_document:
+    number_sections: yes
+    theme: united
+    highlight: tango
+    df_print: paged
+    code_folding: show
+    toc: true
+    toc_float: true
+    toc_depth: 2
+  pdf_document:
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+    keep_tex: yes
+    includes:
+            in_header:
+                header.tex
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = F, warning = F, cache = F)
+options(knitr.kable.NA = '')
+```
+
+# Workspace   
+## Packages  
+
+```{r packages}
+library(mi)
+library(psych)
+library(googlesheets)
+library(twang)
+library(nnet)
+library(lme4)
+library(MuMIn)
+library(readxl)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(plyr)
+library(stringr)
+library(tidyverse)
+library(furrr)
+```
+
+```{r, echo=F}
+setwd("~/Dropbox (Brown)/The Clink/results")
+```
+
+
+## Working Directory  
+
+
+```{r data path}
+data_path <- "~/Dropbox (Brown)/The Clink"
+data_path <- "/Volumes/Emorie Beck/projects/The Clink"
+```
+
+## Load Data  
+First, we will lead in a Google Sheet that indexes original variable names in the NLSY 1979 Child and Young Adults Sample as well as the original NLSY Sample of their mothers. The Sheet also contains rules splitting variables by type (matching variables, predictor variables, grouping variables, and outcome variables) as well as rules for compositing variables and their original scale.  
+
+
+```{r load data}
+# load codebook sheet containing variable names, recoding, etc #
+codebook_path <- sprintf("%s/data/codebook.xlsx", data_path) 
+# create a meta file for downloading the child data
+# dat %>% gs_read(ws = "Child") %>% select(`QName`, year) %>%
+#   write_delim(path = paste(data_path, "meta.CHILDYA", sep = "/"), delim = ",", col_names = F)
+# create a meta file for downloading the mother data
+# dat %>% gs_read(ws = "Mom") %>% select(`QName`, year) %>%
+#   write_delim(path = paste(data_path, "meta.NLSY79", sep = "/"), delim = ",", col_names = F)
+
+# grab the child and mother data of variables chosen to include 
+child <- codebook_path %>% read_xlsx(., sheet = "Child") %>% filter(Include == "Yes")
+mom   <- codebook_path %>% read_xlsx(., sheet = "Mom") %>% filter(Include == "Yes")
+match <- codebook_path %>% read_xlsx(., sheet = "Items") %>% filter(Included == "x")
+moder <- codebook_path %>% read_xlsx(., sheet = "Moderators") 
+```
+
+```{r raw data load, eval = F}
+# load in the Rdata files of the raw, uncleaned NLSY data sets
+load(paste(data_path, "/data/nlsy79cya/nlsy79cya.RData", sep = "/"))
+load(paste(data_path, "data/nlsy79/nlsy79moms.RData", sep = "/"))
+
+# cut additional variables not included in the present analyses
+new_data <- tbl_df(new_data) %>% select(one_of(child$RNUM))
+mom_data <- tbl_df(mom_data) %>% select(one_of(mom$RNUM))
+
+# get IDs of the moms to match with children
+moms <- unique((new_data %>% 
+  select(C0000100, C0000200) %>%
+  setNames(c("PROC_CID", "PROC_MID")))$PROC_CID)
+# get IDs of the children
+part_ids <- new_data %>% 
+  select(C0000100, C0000200, C0005700, C0005400) %>%
+  setNames(c("PROC_CID", "PROC_MID", "Dem_DOBYear", "DemCSex")) %>%
+  filter(!is.na(PROC_CID) & !is.na(PROC_MID))
+# find moms with children
+moms <- unique(part_ids$PROC_MID)
+```
+
+```{r clean data load}
+traits <- tibble(
+  old = c("SensSeek", "Impls", "CESD", "SelfEstm"),
+  new = c("Sensation Seeking", "Impulsivity", "Depressive Symptoms", "Self-Esteem"),
+  breaks = c("Sensation\nSeeking", "Impulsivity", "Depressive\nSymptoms", "Self-\nEsteem")
+)
+```
+
+```{r}
+load(paste(data_path, "data/data.rdata", sep = "/"))
+```
+
+# Data Cleaning  
+## Matching Variables  
+Matching variables are those items that we will use to match individuals on. Ultimately, we will end up with a wide format data frame with the following variables:
+
+```{r match items, results = 'asis'}
+knitr::kable(match %>% select(Category, Item, ItemText), "html", #"latex", 
+             longtable = T, booktabs = T) %>%
+  # kable_styling(latex_options = c("striped","repeat_header"),full_width = F) %>%
+  kable_styling(bootstrap_options = c("striped"),full_width = F) %>%
+  #kable_styling(full_width = F) %>%
+  column_spec(1, width = "4cm") %>%
+  column_spec(3, width = "8cm") %>%
+  scroll_box(width = "750px", height = "400px")
+```
+
+### Mom Data  
+
+```{r mom data, eval = F}
+# get vector of original reference numbers (column names) of the mom data
+mom_long_cols <- (mom %>% filter(!is.na(Rule.Age)))$RNUM
+# get vector of the new variable names of the mom data
+mom_new_cols <- (mom %>% filter(!is.na(Rule.Age)))$comb_varname
+
+mom_long <- mom_data %>% 
+  filter(R0000100 %in% moms) %>%
+  select(R0000100, one_of(mom_long_cols)) %>%               # select ID, DOB, and items for compositing
+  gather(key = item, value = value, one_of(mom_long_cols)) %>% # switch to long format
+  setNames(c("PROC_MID", "item", "value")) %>% # rename columns
+  full_join(part_ids) %>% # add participant IDs
+  mutate(item = mapvalues(item, mom_long_cols, mom_new_cols),
+         value = ifelse(grepl("MJail_MRes", item) == T & value == 5, 1,
+                 ifelse(grepl("MJail_MRes", item) == T & !is.na(value) == T, 0, 
+                 ifelse(grepl("MJail_MRes", item) == F, value, NA))),
+         value = ifelse(grepl("ParDvrcd", item) == T & value == 3, 1,
+                 ifelse(grepl("ParDvrcd", item) == T & !is.na(value) == T, 0, 
+                 ifelse(grepl("ParDvrcd", item) == F, value, NA))),
+         value = ifelse(grepl("HHMomDead", item) == T & value == 65, 1,
+                 ifelse(grepl("HHMomDead", item) == T & !is.na(value) == T, 0, 
+                 ifelse(grepl("HHMomDead", item) == F, value, NA)))) %>% # recode items to to new names
+  left_join((mom %>% # add in rules for compositing and reverse coding
+               select(comb_varname, Rule.Age, Rule.Item, reverse_code) %>% 
+               filter(comb_varname %in% mom_new_cols) %>% 
+               rename(item = comb_varname))) 
+```
+
+### Child / YA Data  
+
+```{r CYA data, eval = F}
+# create a small function for calculating the mode
+Mode <- function(x) {
+  ux <- unique(x)
+  ux <- ux[!is.na(ux)]
+  ux[which.max(tabulate(match(x, ux)))]
+}
+# get vector of original reference numbers (column names) of the child data with multiple waves
+child_long_cols <- (child %>% filter(year != "XRND" & grepl("match", var.type)))$RNUM
+# get vector of the new variable names of the child data with multiple waves
+child_new_cols <- (child %>% filter(year != "XRND" & grepl("match", var.type)))$comb_varname
+
+match_long <- new_data %>%
+  # select ID, DOB, and items for compositing
+  select(C0000100, C0000200, C0005700, C0005400, one_of(child_long_cols)) %>%               
+  gather(key = item, value = value, one_of(child_long_cols)) %>% # switch to long format
+  setNames(c("PROC_CID", "PROC_MID", "Dem_DOBYear", "DemCSex", "item", "value")) %>% # rename columns
+  mutate(item = mapvalues(item, child_long_cols, child_new_cols)) %>% # recode items to to new names
+  left_join((child %>% 
+               select(comb_varname, Rule.Age, Rule.Item, reverse_code) %>% # add in rules for 
+               filter(comb_varname %in% child_new_cols) %>% # compositing and reverse coding
+               rename(item = comb_varname))) %>%
+  full_join((mom_long)) %>%
+  separate(item, c("item", "year"), sep = "[.]") %>% # split items in item and year columns
+  mutate(year = as.numeric(year), # convert year to numeric
+         age = ifelse(!is.na(value) & year >= Dem_DOBYear, 
+                      year - Dem_DOBYear, NA))  # calculate age
+
+match_long2 <- match_long %>%   
+  full_join(match_long %>%
+      filter(grepl("HlthCndLimChck", item)) %>%
+      select(-item, -Rule.Age, -Rule.Item, -reverse_code) %>%
+      rename(hlthChck = value)) %>%
+  mutate(value = ifelse(grepl("HlthCndLim_", item) == T & is.na(value) == T, hlthChck, value)) %>%
+   # get rid of cases where we don't have an age or don't have a value / response
+  filter((!is.na(age) | !is.na(value)) & (age <= 14 | 
+        (item %in% c("HHJail_HHJail", "HHMomDead_HHMomDead", "HHDadDead_HHDadDead")))) %>%                                          
+  mutate(value = ifelse(grepl("UsualRes", item) == T, 
+                        mapvalues(value, seq(1,12,1), c(1, rep(0, 11))), # 1 = with mother; 2 = otherwise
+                 ifelse(grepl("Limit", item) == T, 
+                        mapvalues(value, seq(3,0,-1), seq(0,3,1)), # reverse weird scale for Limiting / Structure
+                 ifelse(grepl("HrTV", item) == T, value/100, 
+                 ifelse(grepl("HlthCndLim", item) == T & !is.na(value) == T & value != 0, 1, 
+                 ifelse(grepl("HlthCndLim", item) == T & !is.na(value) == T & value == 0, 0, 
+                 ifelse(grepl("HlthCndLimScl", item) == T & year %in% seq(1986, 2004,2), 
+                        mapvalues(value, seq(0,2,1), c(0,1,0)), 
+                 ifelse(grepl("EduRemed", item) == T & year %in% seq(1988,1998,2), 
+                        mapvalues(value, c(0,1,2,4), c(0,1,0,0)), 
+                 ifelse(item == "HlthCndReqTr12mo_HlthCndReqTr12mo", 
+                        mapvalues(value, seq(0,2,1), c(0,1,NA)), 
+                 ifelse(item == "DemFathNHH_FathNHH", 
+                        mapvalues(value, 1:4, c(1:3,1)), 
+                 ifelse(grepl("Mom2Dad", item) == T, 
+                        mapvalues(value, seq(1,13,1), c(1, rep(0,12))), 
+                 ifelse(grepl("FathGrade", item) == T, 
+                        mapvalues(value, c(seq(0,20,1),95), c(seq(0,20,1),NA)), 
+                 ifelse(grepl("Home", item) == T & value > 99, 99, 
+                 ifelse(grepl("NghdSf2Scl", item) == T, 
+                        mapvalues(value, c(seq(1,4,1), 6, 25), c(seq(1,4,1), NA, NA)), 
+                        value)))))))))))))) %>%          #Recode weird time variable where 100 = 1 hr to 1 hr = 1 hr
+  group_by(item) %>%
+  mutate(min = min(value, na.rm = T), max = max(value, na.rm = T),                  # find min & max for reverse scoring
+         value = ifelse(reverse_code != "rev", value,                               # leave pos keyed items alone
+                        reverse.code(-1, value, mini = min[1], maxi = max[1]))) %>% # reverse code neg keyed items
+  select(-min, -max) # get rid of min and max columns
+
+
+
+seq_years <- seq(1988,1992, 2)
+# create a sum variable for mom's response to tantrums #
+match_long3 <- match_long2 %>%
+  filter(grepl("DSTantrum", item) == T) %>%
+  mutate(value = ifelse(grepl("DSTantrum", item) == T, 
+                 ifelse(year %in% seq_years & is.na(value) == F, 1, # different selected events in 88-92 coded as 1-7
+                 ifelse(year %in% seq_years & is.na(value) == T, 0, # unselected events not coded
+                 ifelse(year == 1996, recode(value, `2` = 0), 
+                 ifelse(grepl("Talk", item) == T, recode(value, `1` = 0, `0` = 1),
+                        value)))), value)) %>%
+  group_by(PROC_CID, PROC_MID, year, age, item, Rule.Age, Rule.Item) %>%
+  summarize(value = max(value, na.rm = T), # some mothers filled out 6-9 and 10+ surveys in one year
+            value = ifelse(is.infinite(value) == T, NA, value)) %>%  
+  group_by(PROC_CID, PROC_MID, year, age, Rule.Age, Rule.Item) %>% # compositing across different responses
+  summarize(value = sum(value, na.rm = T),
+            item = "MRTantrum_Tantrum") %>%
+  ungroup() %>%
+  # add in health data
+  full_join(match_long2 %>% filter(grepl("HlthCndLim_", item)) %>%
+              group_by(PROC_CID, PROC_MID, age, year, item, Rule.Age, Rule.Item) %>%
+              # average across unique items for the same age first
+              summarize(value = mean(value)) %>%
+              separate(item, c("type", "item")) %>%
+              group_by(PROC_CID, PROC_MID, age, year, type, Rule.Age, Rule.Item) %>%
+              # sum across broader categories of items for the same ages second
+              summarize(value = sum(value)) %>%
+              ungroup() %>%
+              mutate(item = paste(type, type, sep = "_"))) %>%
+  # add in all other match variables but the health and tantrum variables
+  full_join(match_long2 %>% filter(grepl("DSTantrum", item) == F & grepl("HlthCndLim_", item) == F))
+  
+# create a function for compositing matching variables
+sum_fun <- function(df, Rule1, Rule2){
+  fun_call <- function(x, rule){
+    switch(rule,
+           average = mean(x, na.rm = T),
+           mode = Mode(x)[1],
+           sum = sum(x, na.rm = T),
+           select = unique(x)[1],
+           max = max(x, na.rm = T))
+  }
+  df %>%
+    group_by(PROC_CID, item, Dem_DOBYear) %>% # group by person and item (collapse across age)
+    summarize(value = fun_call(value, Rule1)) %>% # use proper summary function on each group combination
+    mutate(value = ifelse(is.nan(value) == T, NA, # get rid of NaN and Inf values
+                 ifelse(is.infinite(value) == T, NA, value))) %>%
+    separate(item, c("type", "item")) %>% # split item further into category and unique item
+    group_by(PROC_CID, type) %>% # group by subject and type (collapse across item)
+    summarize(value = fun_call(value, Rule2)) %>% # use proper summary function on each group combination
+    mutate(value = ifelse(is.nan(value) == T, NA, # get rid of NaN and Inf values
+                 ifelse(is.infinite(value) == T, NA, value))) %>%
+    ungroup()
+}
+
+child_wide_cols <- (child %>% filter(year == "XRND" & grepl("match", var.type)))$RNUM
+child_new_cols <- (child %>% filter(year == "XRND" & grepl("match", var.type)))$comb_varname
+child_new_cols <- gsub(".XRND", "", child_new_cols)
+
+# here, we are going to grab the child data with only one response, clean up variables that need to be recoded
+# these are intentionally in wide format and will eventually be joined with other data
+
+match_wide <- new_data %>%
+  select(C0000100, C0000200, C0005700, C0005400, one_of(child_wide_cols)) %>% # select ID, DOB, and items for compositing
+  gather(key = item, value = value, -C0000100, -C0000200, -C0005700, -C0005400) %>% # switch to long format
+  setNames(c("PROC_CID", "PROC_MID", "Dem_DOBYear", "DemCSex", "item", "value")) %>% # rename columns
+  mutate(item = mapvalues(item, child_wide_cols, child_new_cols)) %>%
+  filter(!is.na(value) & !(item %in% c("DemHeightIN", "DemHeightFT", "DemWeightLBS"))) %>%
+  mutate(value = ifelse(grepl("MRed", item) == T, mapvalues(value, c(0,1,4), c(0,1,1)), value)) %>%
+  separate(item, c("type", "item"), sep = "[_]") %>% # split items in item and year columns
+  group_by(PROC_CID, PROC_MID, type, Dem_DOBYear, DemCSex) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(value = ifelse(grepl("MRed", type) == T | grepl("Diuret", type) == T, ceiling(value), value)) %>%
+  spread(key = type, value = value) %>%
+  mutate(DemRace = mapvalues(DemRace, seq(1,3,1), seq(3,1,-1)),
+         BreastFed = ifelse(WkBreastFedEnd > WkBreastFedBeg, WkBreastFedEnd - WkBreastFedBeg, NA)) %>%
+  select(-WkBreastFedEnd, -WkBreastFedBeg)
+
+# run the summary function created above on the long format cross-time matching variables
+match_wide <- match_long3 %>%
+  group_by(Rule.Age, Rule.Item) %>% # group by rules because it's faster
+  nest() %>% # nest all the data for each rule combination together
+  mutate(value = pmap(list(data, Rule.Age, Rule.Item), possibly(sum_fun, NA_real_))) %>% # call the summary function
+  select(-data) %>% 
+  unnest(value) %>% # unnest the results
+  ungroup() %>%
+  select(-contains("Rule")) %>% # get rid of the rule variables
+  spread(key = type, value = value) %>% # change to wide format
+  mutate(HomeBin = ceiling(HomeBin),
+         MWelfare = ifelse(is.na(MWelfare) == T, 0, MWelfare),
+         HlthCndLim = ifelse(is.na(HlthCndLim) == T, 0, HlthCndLim)) %>% 
+  select(-contains("eight")) %>% # get rid of height and weight; we'll take care of those later
+  full_join(match_wide) %>% # join with wide format matching variables
+  mutate_all(as.numeric) # make sure they are all numeric
+
+## norm height and weight information by age) ##
+# height and weight are tricky, so instead of using sometimes unreliable raw height and weight data, we will use 
+# the World Health Organization's norms to calculate height-for-age and weight-for-age percentiles
+source(paste(data_path, "data/who2007_R/who2007.R", sep = "/"))
+htwt <- match_long3 %>% ungroup() %>%
+  # grab height and weight variables for 9-10 year olds
+  filter(item %in% c("DemHeightFT_HeightFT", "DemHeightIN_HeightIN", "DemWeightLBS_WeightLBS") & age %in% c(9,10)) %>%
+  select(PROC_CID, PROC_MID, age, DemCSex, year, item, value) %>%
+  group_by(PROC_CID, PROC_MID, age, DemCSex, year, item) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  spread(key = item, value = value) %>% # change to wide format
+  # get rid of implausible height values
+  filter(!(DemHeightFT_HeightFT > 5 & DemHeightIN_HeightIN < 12) &
+         !is.na(DemHeightIN_HeightIN) & !is.na(DemWeightLBS_WeightLBS) & !is.na(DemHeightFT_HeightFT)) %>%
+  # convert weight to kilograms, height to centimeters, and age to months
+  mutate(DemWeightKG_WeightKG = DemWeightLBS_WeightLBS/2.2,
+         DemHeightIN_HeightIN = ifelse(DemHeightIN_HeightIN < 12 & DemHeightFT_HeightFT < 6, 
+                                       DemHeightIN_HeightIN + (DemHeightFT_HeightFT * 12), DemHeightIN_HeightIN),
+         DemHeightCM_HeightCM = DemHeightIN_HeightIN * 2.54,
+         ageMon = 12*age) %>%
+  # catch remaining implausible values
+  filter(DemWeightLBS_WeightLBS > 30 & DemHeightIN_HeightIN > 30)
+
+htwt <- data.frame(htwt)
+wfawho2007<-read.table(paste(data_path, "data/who2007_R/wfawho2007.txt", sep = "/"), header=T,sep="",skip=0)
+hfawho2007<-read.table(paste(data_path, "data/who2007_R/hfawho2007.txt", sep = "/"),header=T,sep="",skip=0)
+bfawho2007<-read.table(paste(data_path, "data/who2007_R/bfawho2007.txt", sep = "/"),header=T,sep="",skip=0) 
+who2007(FilePath=paste(data_path, "data", sep = "/"),
+        FileLab = "nlsy_who", mydf=htwt, sex=DemCSex, age=ageMon, 
+        weight=DemWeightKG_WeightKG, height=DemHeightCM_HeightCM)
+htwt <- read.csv(paste(data_path, "data/nlsy_who_z.csv", sep = "/"), stringsAsFactors = F)  %>%
+  select(PROC_CID, PROC_MID, age, DemCSex, zhfa, zwfa) %>%
+  mutate(DemPweight = pnorm(zwfa), DemPheight = pnorm(zhfa)) %>%
+  select(-zwfa, -zhfa, -age) %>% ungroup()
+
+# add the height and weight variables to the matching dataset
+match_wide <- match_wide %>% left_join(htwt) %>% ungroup()
+
+# get unique subjects in the matching variables
+rm(list = ls()[grepl("match_long", ls())])
+```
+
+```{r print match}
+head(match_wide)
+```
+
+## Groups  
+To do propensity score weighting, we need to define our groups - Jail, Court Ordred Community Service, or neither. We are interested in incarceration in adolscence, which we define as ages below 19. Because we do not want our groups to overlap, anyone who was both incarcerated and participated in community service were included in the incarcerated group only.
+```{r Group Data, eval = F}
+# get vector of original reference numbers (column names) of the child data with multiple waves
+child_long_cols <- (child %>% filter(year != "XRND" & var.type == "group"))$RNUM
+# get vector of the new variable names of the child data with multiple waves
+child_new_cols <-  (child %>% filter(year != "XRND" & var.type == "group"))$comb_varname
+
+# create age categories
+age_orig <- seq(8, 19, 1)
+age_cat <- rep(c(9,10,12,14,16,18), each = 2)
+
+group_long <- new_data %>%
+  select(C0000100, C0000200, C0005700, C0005400, one_of(child_long_cols)) %>%
+  gather(key = item, value = value, one_of(child_long_cols)) %>%
+  setNames(c("PROC_CID", "PROC_MID", "Dem_DOBYear", "DemCSex", "item", "value")) %>% # rename columns
+  mutate(item = mapvalues(item, child_long_cols, child_new_cols)) %>%
+  separate(item, c("item", "year"), sep = "[.]") %>%
+  mutate(year = as.numeric(year), 
+         age = ifelse(!is.na(value) & year >= Dem_DOBYear, year - Dem_DOBYear, NA)) %>%
+  filter(!is.na(age) & !is.na(value) & age <= 19) %>%
+  mutate(age = mapvalues(age, age_orig, age_cat),
+         #age = ifelse(age <= 19, "<19", ">19"), 
+         value = ifelse(item == "Jail_ResJail",
+                        mapvalues(value, seq(1:22), c(rep(0,4), 1, rep(0,17))), value)) %>%
+  #unite(item, item, age, sep = ".") %>%
+  group_by(PROC_CID, PROC_MID, DemCSex, item, age, year) %>%
+  summarize(value = max(value, na.rm = T)) %>%
+  ungroup() %>%
+  separate(item, c("type", "item")) %>%
+  group_by(PROC_CID, PROC_MID, DemCSex, type, year, age) %>%
+  summarize(value = max(value), 
+            value = ifelse(value != 0, 1,
+                    ifelse(is.na(value) == T, NA, 0)),
+            cont_age = ifelse(any(value == 1), min(age[value == 1], na.rm = T), NA),
+            cont_year = ifelse(any(value == 1), min(year[value == 1], na.rm = T), NA)) %>%
+  ungroup() 
+
+group_long2 <- group_long %>%
+  group_by(PROC_CID, PROC_MID, type) %>%
+  mutate_at(vars(cont_age, cont_year), 
+      function(x){if(any(!is.na(x))) max(x, na.rm = T) else x}) %>%
+  group_by(PROC_CID, PROC_MID, DemCSex, type, cont_age, cont_year) %>%
+  summarize(value = max(value), 
+            value = ifelse(value != 0, 1,
+                    ifelse(is.na(value) == T, NA, 0))) %>%
+  ungroup()
+
+group_wide <- group_long2 %>%
+  select(-cont_age, -cont_year) %>%
+  distinct() %>%
+  spread(key = type, value = value) %>%
+  gather(key = type, value = value, Cnsling:Jail) %>% # adding in NA's
+  mutate(value = mapvalues(value, c(0,1,NA), c(0,1,0))) %>%
+  spread(key = type, value = value) %>%
+  mutate(CommServ = ifelse(CrtCommServ == 1, 1, 0),
+         groups = ifelse(Jail == 1, 1, 
+                  ifelse(CommServ == 1, 2,
+                  ifelse(Jail == 0 & CommServ == 0, 0, NA))),
+         groups = factor(groups, levels = seq(0,2,1), labels = c("None", "Jail", "CommServ")))
+
+groups_tv <- group_long2 %>% 
+  select(PROC_CID:DemCSex, groups = type, cont_age, cont_year) %>% 
+  filter(complete.cases(.)) %>% 
+  distinct() %>% 
+  mutate(groups = ifelse(groups == "CrtCommServ", "CommServ", groups)) %>%
+  right_join(group_wide %>% select(-(Cnsling:Jail))) %>%
+  distinct() %>%
+  group_by(PROC_CID, PROC_MID, DemCSex, groups) %>%
+  summarize_at(vars(cont_age, cont_year), ~ifelse(all(is.na(.)), ., min(., na.rm = T))) %>%
+  ungroup()
+
+match_wide <- match_wide %>%
+  left_join(group_wide %>% ungroup() %>% select(PROC_CID, groups))
+```
+
+
+```{r print groups}
+table(group_long$groups)
+head(group_long)
+```
+
+## Personality   
+We have four predictor/outcomes, whose trajectory over time we will track using growth models. For these, we want data from adolescence, so we choose variables we choose 4 perosnality variables whose data we have throughout the period -- Impulsivity, Sensation Seeking, Self-Esteem, and CESD depression.
+
+```{r pred data, eval = F}
+child_long_cols <- (child %>% filter(year != "XRND" & var.type == "predictor"))$RNUM
+child_new_cols <-  (child %>% filter(year != "XRND" & var.type == "predictor"))$comb_varname
+
+age_orig <- seq(6, 43, 1)
+age_cat <- rep(seq(6,42,2), each = 2)
+
+pred_alpha <- new_data %>%
+  select(C0000100, C0000200, C0005700, C0005400, one_of(child_long_cols)) %>%
+  gather(key = item, value = value, one_of(child_long_cols)) %>%
+  setNames(c("PROC_CID", "PROC_MID", "Dem_DOBYear", "DemCSex", "item", "value")) %>% # rename columns
+  mutate(item = mapvalues(item, child_long_cols, child_new_cols)) %>%
+  left_join((child %>% 
+               select(comb_varname, reverse_code) %>% # add in rules for 
+               filter(comb_varname %in% child_new_cols) %>% # compositing and reverse coding
+               rename(item = comb_varname))) %>%
+  separate(item, c("item", "year"), sep = "[.]") %>%
+  #filter(!grepl("chld", item)) %>%
+  mutate(year = as.numeric(year), 
+         age = ifelse(!is.na(value) & year >= Dem_DOBYear, year - Dem_DOBYear, NA)) %>%
+  filter(!is.na(age) & !is.na(value) & age > 6) %>%
+  mutate(age = mapvalues(age, age_orig, age_cat)) %>%
+  #unite(item, item, age, sep = ".") %>%
+  group_by(item) %>%
+  mutate(value = ifelse(reverse_code != "rev", value,
+                        reverse.code(-1, value, mini = 1, maxi = 4))) %>%
+  ungroup() %>%
+  mutate(item = gsub("chld", "", item)) %>%
+  group_by(PROC_CID, item, age, year) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup()
+
+pred_long <- pred_alpha %>%
+  separate(item, c("item", "type")) %>%
+  group_by(PROC_CID, item, age, year) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  mutate(age0 = age-14)
+
+match_wide <- pred_long %>% filter(age == 14) %>%
+  select(PROC_CID, item, value) %>% 
+  spread(item, value) %>%
+  right_join(match_wide)
+```
+
+### Scale Reliability  
+```{r reliability, results = 'asis'}
+alpha_fun <- function(df){
+  (df %>% select(PROC_CID, type, value) %>%
+    spread(key = type, value = value) %>%
+    select(-PROC_CID) %>%
+    psych::alpha(.))$total[,1]
+}
+
+alpha.df <- pred_alpha %>%
+  separate(item, c("item", "type")) %>%
+  filter(type != "Capable") %>%
+  group_by(item, year) %>%
+  nest() %>%
+  mutate(alpha = map_dbl(data, alpha_fun))
+  
+alpha.df %>% 
+  select(-data) %>%
+  spread(key = item, value = alpha) %>%
+  kable(., format = "html", booktabs = T, digits = 2,
+    caption = "Cronbach's Alpha  Over Ages") %>%
+    kable_styling(c("striped","repeat_header"),
+                  full_width = F)
+```
+
+
+### Raw Trajectories  
+First, we look at the raw trajectories of the data in order to ensure that our results match those from earlier work.  
+
+```{r pred plot}
+head(pred_long)
+
+pred_long %>% 
+  full_join(group_wide %>% select(PROC_CID, groups)) %>%
+  select(item, age, value, groups) %>%
+  filter(!is.na(item) & !is.na(groups)) %>%
+  Rmisc::summarySE(groupvars = c("item", "age", "groups"), measurevar = "value") %>% 
+  group_by(item) %>%
+  #mutate(value = as.numeric(scale(value))) %>%
+  ggplot(aes(x = age, y = value)) + 
+  geom_point(size = 1.3) + 
+  geom_line(aes(color = groups)) + 
+  #geom_errorbar(aes(ymin = value - ci, ymax = value + ci),position = "dodge", width = .1, stat = "identity") + 
+  facet_wrap(~item, ncol = 2, scales = "free") +
+  theme_classic() +
+  theme(legend.position = "bottom")
+```
+
+## Moderators  
+
+We test a variety of demographic moderators (e.g. gender) as well as moderators correpondeng to the ACE Model.  
+
+```{r moderator table, results = 'asis'}
+knitr::kable(moder %>% select(Category, Item, ItemText), "html", # "latex", 
+             longtable = T, booktabs = T) %>%
+  # kable_styling(latex_options = c("striped","repeat_header"),full_width = F) %>%
+  kable_styling(bootstrap_options = c("striped","repeat_header"),full_width = F) %>%
+  #kable_styling(full_width = F) %>%
+  column_spec(1, width = "4cm") %>%
+  column_spec(3, width = "8cm")
+```
+
+```{r moderater data, eval = F}
+moder_wide <- match_wide %>% 
+  select(PROC_CID, Dem_DOBYear, one_of(moder$Item)) %>%
+  mutate(MWelfare = factor(ifelse(MWelfare == 0, 0, 
+                    ifelse(!is.na(MWelfare) == T, 1, NA)), 
+                    levels = c(0,1)),#, labels = c("NoWelfare","Welfare")),
+         DSSpank = factor(ifelse(DSSpank == 0, 0, 
+                    ifelse(!is.na(DSSpank) == T, 1, NA)), 
+                    levels = c(0,1)),#, labels = c("NotSpanked","Spanked")),
+         HlthCndLim = factor(ifelse(HlthCndLim > 1, 1, 
+                 ifelse(!is.na(HlthCndLim) == T, 0, NA)), 
+                    levels = c(0,1)),##, labels = c("NoHlthProb","HlthProb")),
+         DemRace = factor(mapvalues(DemRace, from = 1:3, to = 0:2),
+                          levels = c(0,1,2)),#, labels = c("White", "Black", "Other")),
+         DemCSex = factor(mapvalues(DemCSex, from = 1:2, to = 0:1), 
+                          levels = c(0,1)),#, labels = c("M", "F")),
+         DemFathNHH = factor(mapvalues(DemFathNHH, from = 1:3, to = c(0,0,1)), 
+                             levels = 0:2),#, labels = c("Bio", "Step", "None")),
+         ParDvrcd = factor(ParDvrcd, levels = c(0,1)),#, labels = c("Tog", "Div")),
+         HHParDead = factor(Matrix::rowSums(cbind(HHMomDead, HHDadDead), na.rm = T), levels = c(0,1,2)),
+         HHDadDead = factor(HHDadDead, levels = c(0,1)),#, labels = c("DA", "DD")),
+         HHMomDead = factor(HHMomDead, levels = c(0,1)),#, labels = c("MA", "MD")),
+         none = NA_character_)
+
+moder_long <- moder_wide %>% mutate_if(is.factor, funs(as.numeric(as.character(.)))) %>%
+  mutate_if(is.character, funs(as.numeric)) %>%
+  gather(key = moditem, value = modvalue, -PROC_CID, -Dem_DOBYear) %>% 
+  filter(!is.na(modvalue))
+```
+
+
+
+## Outcomes  
+
+```{r outcome data, eval = F}
+child_long_cols <- (child %>% filter(year != "XRND" & var.type == "outcome"))$RNUM
+child_new_cols <-  (child %>% filter(year != "XRND" & var.type == "outcome"))$comb_varname
+
+age_orig <- seq(6, 25, 1)
+age_cat <- rep(seq(6,24,2), each = 2)
+
+outcome_long <- new_data %>%
+  select(C0000100, C0000200, C0005700, one_of(child_long_cols)) %>%
+  gather(key = item, value = value, one_of(child_long_cols)) %>%
+  setNames(c("PROC_CID", "PROC_MID", "Dem_DOBYear", "item", "value")) %>%
+  mutate(item = mapvalues(item, child_long_cols, child_new_cols)) %>%
+  separate(item, c("item", "year"), sep = "[.]") %>%
+  mutate(year = as.numeric(year), 
+         age = ifelse(!is.na(value) & year >= Dem_DOBYear, year - Dem_DOBYear, NA)) %>%
+  filter(!is.na(age) & !is.na(value) & age <= 25) %>%
+  mutate(age = mapvalues(age, age_orig, age_cat)) %>%
+  #unite(item, item, age, sep = ".") %>%
+  group_by(PROC_CID, item, age) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup()
+
+outcome_wide <- outcome_long %>%
+  separate(item, c("item", "type")) %>%
+  group_by(PROC_CID, item, age) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  ungroup() %>%
+  full_join(outcome_long) %>%
+  unite(comb, item, age, sep = ".") %>%
+  spread(key = comb, value = value) 
+
+save(match_wide, outcome_wide, pred_long, group_wide, moder_wide, 
+     moder_long, moder, pred_alpha, groups_tv,
+     file = paste(data_path, "data", "data.RData", sep = "/"))
+```
+
+```{r print outcomes}
+head(outcome_wide)
+```
+
+```{r}
+pred_long %>%
+  select(PROC_CID, item, age, year) %>%
+  distinct() %>%
+  right_join(group_long3) 
+
+```
+
+
+# Multiple Imputation  
+We perform multiple imputation using the `mi` package. We use the variables we defined before in the `match_wide` data set. Before doing so, we first create a missing data frame and examine missingness patterns. Then we run the mi and save them to a list for use in propensity score weighting.  
+
+## Pre-Work: Correlations  
+
+```{r zero order r}
+r <- match_wide %>% 
+  select(-PROC_CID, -PROC_MID) %>% 
+  mutate_all(funs(as.numeric)) %>% 
+  cor(., use = "pairwise")
+
+data.frame(r) %>% mutate(var = colnames(.)) %>%
+  gather(key = var2, value = value, -var) %>%
+  mutate(value = ifelse(var == var2, 0, value)) %>%
+  ggplot(aes(x = var, y = var2, fill = value)) +
+  geom_raster() +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red",
+                       limit = c(-1,1), midpoint = 0) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 90)) 
+```
+
+
+
+## MI Procedure  
+
+```{r mi proc, eval = F}
+outcome_subs <- unique(as.character(outcome_wide$PROC_CID))
+match_subs <- unique(as.character(match_wide$PROC_CID))
+group_subs <- unique(as.character(group_wide$PROC_CID))
+pred_subs <- unique(as.character(pred_long$PROC_CID))
+
+# figure out which subjects have grouping, matching, predictor, and outcome data
+subs <- match_subs[match_subs %in% group_subs]
+subs <- subs[subs %in% pred_subs]
+subs <- subs[subs %in% outcome_subs]
+
+# keep only those people
+match_wide   <- match_wide   %>% filter(PROC_CID %in% subs)
+pred_long    <- pred_long    %>% filter(PROC_CID %in% subs)
+outcome_wide <- outcome_wide %>% filter(PROC_CID %in% subs)
+
+# get a list of all objects in teh environment and keep only those we need to MI and PSW
+all_env <- ls()
+all_env <- all_env[!(all_env %in% 
+          c("pred_long", "outcome_wide", "match_wide", "pred_alpha", "groups_tv",
+            "dat", "child", "mom", "data_path", "moder_wide", "group_wide"))]
+rm(list = all_env)
+gc()
+
+# MI doesn't like tibbles, so we need to unclass and reclass the data
+match_wide <- data.frame(unclass(match_wide)) # mi doesn't like tibbles
+nlsy.mdf <- missing_data.frame(data.frame(unclass(match_wide)))
+
+image(nlsy.mdf)
+```
+
+![](plots/mdf.pdf)  
+
+```{r mdf, eval = F}
+# get descriptives of the data
+des <- describe(match_wide,fast = T)
+nlsy.mdf <- change(data = nlsy.mdf, y = rownames(des)[des$range >= 3],
+                   what = "type", to = "continuous")
+nlsy.mdf <- change(data = nlsy.mdf, y = c("DemPweight", "DemPheight"),
+                   what = "type", to = "continuous")
+gc()
+
+nlsy.mi <- mi(nlsy.mdf, n.chains = 10, n.iter = 20, parallel = T)
+gc()
+image(nlsy.mi)
+```
+
+![](plots/mi.pdf)  
+
+```{r comp mi, eval = F}
+completed.nlsy <- mi::complete(nlsy.mi)
+save(completed.nlsy, nlsy.mdf, nlsy.mi, file = paste(data_path, "results/mi_dat.RData", sep = "/"))
+
+clean.mi.fun <- function(df, Chain){
+  df <- tbl_df(df) %>% select(-contains("missing_"))
+}
+
+nested.mi <- 
+  tibble(chain = paste("chain", 1:10, sep = "."), data = completed.nlsy) %>%
+  mutate(imp.data = map2(data, chain, possibly(clean.mi.fun, NA_real_))) 
+
+nested.mi <- nested.mi %>% mutate(match_set = "selection") %>%
+  bind_rows(nested.mi %>% mutate(match_set = "socialization"))
+```
+
+
+
+# Propensity Score Matching  
+Then, we perform propensity score weighting using our imputed datasets using the `twang` package. We then add the weights to our matching data frame, along with our predictor variables. To test the effectiveness of the propensity score weighting procedure, we examine the average standardized effect size in the balance tables. minimal effect sizes are candidates for beng dropped from the propensity score weighting, and large effect sizes mean our weighting procedure wasn't effective.  We can also examine these using balance plots.
+
+## Raw Group Differences  
+
+```{r raw grp diff}
+temp <- tbl_df(match_wide) %>% 
+  group_by(groups) %>%
+  summarize(n = n(), 
+            `% Female` = sum(DemCSex == 2)/ sum(DemCSex %in% c(1,2)),
+            `Mean Age 2017` = mean(2017 - Dem_DOBYear, na.rm = T)) 
+  bind_rows(temp, temp %>% ungroup() %>% 
+              summarize(n = sum(n), 
+                        `% Female` = mean(`% Female`), groups = "Total",
+                        `Mean Age 2017` = mean(`Mean Age 2017`))) %>%
+  kable(., "html", #"latex", 
+          escape = F, booktabs = T, digits = 2,
+          col.names = c("Group", "N", "% Female", "Mean Age 2017")) %>%
+  # kable_styling(latex_options = c("striped","repeat_header"),full_width = F)
+    kable_styling(bootstrap_options = c("striped","repeat_header"),full_width = F)
+```
+
+
+## Choose Matching Variables  
+We had some issues achieving balance. So, we elected to evaluate the effect size of our matching variables across groups and keep only those variables with raw differences larger than .2.  
+```{r psw crit, eval = F}
+df <- tbl_df(completed.nlsy[[1]]) %>% select(-contains("missing"))
+df <- df %>% select(-groups) %>%
+  mutate_if(is.factor, funs(as.numeric(as.character(.)))) %>%
+  full_join(df %>% select(PROC_CID, groups)) %>%
+  gather(key = item, value = value, CESD:DemPheight) 
+
+d_fun <- function(Item, V1, V2){
+  dat <- df %>% filter(item == Item & groups %in% c(V1, V2)) %>%
+    mutate(groups = factor(groups, levels = c(V1, V2)))
+  d <- lsr::cohensD(value ~ groups, data = dat)
+}  
+
+keep <- crossing(
+  Groups = c("None-Jail", "None-CommServ", "Jail-CommServ"),
+  Item = unique(df$item)
+) %>%
+  tbl_df() %>%
+  separate(Groups, c("V1", "V2")) %>%
+  mutate(d = pmap_dbl(list(Item, V1, V2), d_fun))
+
+keep_vars <- unique((keep %>% filter(d > .2))$Item)
+keep_vars <- c(keep_vars, "SelfEstm")
+```
+
+
+## Define Functions  
+
+```{r psw funs, eval = T}
+# this function actually runs the propensity score weighting procedure
+psw_fun <- function(df, match_set){
+  if(match_set == "socialization"){
+  to.match <- colnames(df)[-which(colnames(df) %in% c("PROC_CID","PROC_MID","groups"))]
+  } else{
+    to.match <- colnames(df)[-which(colnames(df) %in% c("PROC_CID","PROC_MID","groups",
+                                            "CESD", "SelfEstm", "Impls", "SensSeek"))]
+  }
+  match.formula <- as.formula(paste("groups ~ ", paste(to.match, collapse=" + "), sep = " "))
+  y <- mnps(formula = match.formula,
+            data=df,
+            n.trees=10000,
+            stop.method = c("es.mean"))
+}
+
+# changing the data fed into psw into a data frame because it won't work with tibbles
+psw_df <- function(psw){psw$data <- data.frame(psw$data); psw}
+
+# once weighting is done, we pull the weights back into the original mi df
+# and join back with the df of personality variables
+add_psw_weights <- function(psw, df){
+  df$psw.weights <- get.weights(psw)
+  df <- df %>% 
+    select(PROC_CID, groups, psw.weights, CESD, SelfEstm, SensSeek, Impls) %>%
+    mutate(groups = relevel(groups, "None"))
+  return(df)
+}
+
+# this function creates the balance table of the psw weights and filters 
+# the results into variables the matching procedure did not fix and 
+# those that it did
+unbalanced_fun <- function(x){
+  #x <- bal.table(psw)
+  y <- x %>% 
+    filter(stop.method == "ks.mean" | stop.method == "unw") %>% 
+    select(stop.method, tmt1, tmt2, var, std.eff.sz) %>%
+    group_by(stop.method, tmt1, tmt2, var) %>%
+    summarize(m.eff = mean(std.eff.sz)) %>%
+    filter((stop.method == "ks.mean" & m.eff >= .2) |
+           (stop.method == "unw" & m.eff <= .05)) %>%
+    setNames(c("stop.method", "Group1", "Group2", "Variable", "Average Standardized Effect"))
+  unbalanced.var <- tbl_df(y) %>% filter(stop.method == "ks.mean") %>% select(-stop.method)
+  smalldiff.var <- tbl_df(y) %>% filter(stop.method == "unw") %>% select(-stop.method)
+  return(list(unbalanced = unbalanced.var,smalldiff = smalldiff.var))
+}
+```
+
+
+## Run Matching  
+```{r run psw, eval = F}
+plan(multiprocess(workers = 3L))
+nested.psw <- nested.mi %>%
+  mutate(imp.data = map(imp.data, function(x){x %>% select(PROC_CID, groups, one_of(keep_vars))}),
+         psw = future_map2(imp.data, match_set, possibly(psw_fun, NA_real_), .progress = T),
+         psw = map(psw, possibly(psw_df, NA_real_)),
+         bal.tab = map(psw, possibly(bal.table, NA_real_)),
+         bal.df = map(bal.tab, possibly(unbalanced_fun,  NA_real_)),
+         unbal.tab = map(bal.df, possibly(~.$unbalanced, NA_real_)),
+         smalldiff.tab = map(bal.df, possibly(~.$smalldiff, NA_real_))) 
+closeAllConnections()
+gc()
+```
+
+
+
+## Balance Tables  
+Once propensity scores are estimated, `bal.table()` produces a table that shows how well the resulting weights succeed in manipulating the groups so that they match on pre-adolescent matching characteristics.  
+
+```{r bal tabs, message = F, warning = F, results = 'asis'}
+load(sprintf("%s/results/psw_small.RData", data_path))
+# this table identifies variables differences in effect size pre and post weighting
+diff.tab <- nested.psw %>% filter(match_set == "socialization") %>%
+  unnest(bal.tab) %>%
+  filter(stop.method %in% c("es.mean", "unw")) %>%
+  group_by(stop.method, tmt1, tmt2, var) %>%
+  summarise(m.eff = mean(std.eff.sz)) %>%
+  select(tmt1, tmt2, var, stop.method, m.eff) %>%
+  spread(key = stop.method, value = m.eff) %>%
+  mutate(diff = unw - es.mean) %>%
+  arrange(diff)
+kable(diff.tab, "html", digits = 3,
+      longtable = T, booktabs = T, escape = F,
+      col.names = c("Group 1", "Group 2", "Matching<br>Variable",
+                    "Weighted<br>Effect Size", "Unweighted<br>Effect Size",
+                    "Change<br>Effect Size"),
+      caption = "Change in Effect Size after Propensity Score Weighting") %>%
+  # kable_styling(latex_options = c("striped","repeat_header"),full_width = F)
+  kable_styling(bootstrap_options = c("striped","repeat_header"),full_width = F) %>%
+  scroll_box(width = "750px", height = "400px")
+
+# this table shows variables that are not matched after weighting
+unbal.tab <- nested.psw %>%  
+  filter(match_set == "socialization") %>%
+  select(chain, match_set, unbal.tab) %>% 
+  unnest(unbal.tab) %>% 
+  group_by(Group1, Group2, Variable) %>% 
+  summarize(`Average Standardized Effect` = mean(`Average Standardized Effect`, na.rm = T)) %>%
+  ungroup()
+# kable(unbal.tab, "latex", longtable = T, booktabs = T,
+#       caption = "Unbalanced Variables after Propensity Score Weighting") %>%
+#   kable_styling(latex_options = c("striped","repeat_header"),full_width = F)
+  
+# this table shows variables that were already matched prior to weighting
+smalldiff.tab <- nested.psw %>%  
+  filter(match_set == "socialization") %>%
+  select(chain, match_set, smalldiff.tab) %>% 
+  unnest(smalldiff.tab) %>% 
+  group_by(Group1, Group2, Variable) %>% 
+  summarize(`Average Standardized Effect` = mean(`Average Standardized Effect`, na.rm = T)) %>%
+  ungroup()
+kable(smalldiff.tab
+      , "html" # "latex", 
+      , longtable = T
+      , booktabs = T
+      , caption = "Variables with Initial Small Difference"
+      , digits = 2) %>%
+  # kable_styling(latex_options = c("striped","repeat_header"),full_width = F)
+  kable_styling(bootstrap_options = c("striped","repeat_header"),full_width = F) %>%
+  scroll_box(width = "750px", height = "400px")
+```
+
+
+
+## Balance Plots  
+In these plots, substantial reductions in effect sizes are observed for most variables (blue lines), with only one variable showing an increase in effect size (red lines), but only a seemingly trivial increase. Closed red circles indicate a statistically significant difference, many of which occur before weighting, none after.   
+
+```{r bal plot fun, eval = F}
+print_plot_fun <- function(p, Chain){
+  p$main <- sprintf("Imputed dataset %s", gsub("chain.", "", Chain))
+  p
+}
+par(mfrow = c(2,5))
+nested.psw <- nested.psw %>% 
+  mutate(imp.data.long = map2(psw, imp.data, possibly(add_psw_weights, NA_real_)),
+         plots = map(psw, possibly(~plot(., plots = "es"), NA_real_)),
+         plots = map2(plots, chain, possibly(print_plot_fun, NA_real_)))
+```
+
+
+
+
+
+```{r print bal plot1, fig.height = 9, fig.width = 6.5, eval = F}
+plots <- nested.psw$plots
+
+do.call("grid.arrange", args = list(grobs = plots[1:6], nrow = 3))
+```
+
+
+```{r print bal plot2, fig.height = 6, fig.width = 6.5, eval = F}
+do.call("grid.arrange", args = list(grobs = plots[7:10], nrow = 2))
+```
+
+
+```{r save psw, eval = F, include = F}
+save(nlsy.mdf, nested.mi, nested.psw, completed.nlsy, nlsy.mi, 
+     file = sprintf("%s/results/data_mi_psw.RData", data_path))
+
+# PSW
+save(nested.psw, file = sprintf("%s/results/psw.RData", data_path))
+nested.psw <- nested.psw %>% select(chain, match_set, imp.data.long)
+save(nested.psw, file = sprintf("%s/results/psw_small.RData", data_path))
+```
+
+```{r clear envir, include = F}
+# clear up the environment
+all_env <- ls()
+all_env <- all_env[!(all_env %in% c("data_path", "pred_long", "outcome_wide", "match_wide", "group_wide"))]
+rm(list = all_env)
+```
+
+# Selection Effects: Logistic Regressions  
+First, we want to test selection effects -- does personality predict whether an adolescent has contact with the criminal justice system. To that, we use personality at age 14 in a multinomial regression using the `multinom()` function in the `nnet` package.  
+
+The propensity score weights we use here are different from the ones we'll use for socialization effects because they do not account for baseline personality when matching. 
+## Run Models  
+
+```{r sel mods, eval = F}
+load(sprintf("%s/results/psw_small.RData", data_path))
+
+nested.sel <- expand.grid(
+  Trait = unique(pred_long$item),
+  weight = c("weighted", "unweighted"),
+  stringsAsFactors = F
+  )
+
+sel_fun <- function (trait, weight, ms){
+  models <- lapply(1:10, function(x){
+    # require(tidyverse); require(lavaan)
+    print(paste(trait, x), sep = " ")
+    df <- nested.psw %>% filter(chain == paste("chain", x, sep = ".") & match_set == ms) %>%
+          unnest(imp.data.long) %>% 
+          left_join(pred_long %>% filter(age == 14 & item == trait)) %>%
+      filter(!is.na(item))
+   if(weight != "weighted"){
+      df$psw.weights <- rep(1, nrow(df))
+    } 
+      mod <- nnet::multinom(
+        groups ~ value, data = df, weights = psw.weights
+        )
+    # file <- sprintf("%s/results/models/%s_%s_chain%s.RData", data_path, trait, event, x)
+    # save(mod, file = file)
+  return(mod)
+  })
+}
+
+start <- Sys.time()
+nested.sel <- nested.sel %>% 
+  mutate(sel.mod = map2(Trait, weight, ~sel_fun(.x, .y, "selection")))
+end <- Sys.time()
+
+save(nested.sel, file = sprintf("%s/results/selection.RData", data_path))
+```
+
+
+
+## Pool Results  
+
+```{r sel pool}
+load(sprintf("%s/results/selection.RData", data_path))
+
+sel_pool_fun <- function(models, type){
+  ###
+  ### Get coefs for pooling FE's across imputations ###
+  ####
+  nchains   <- length(models)
+  nterms    <- nrow(vcov(models[[1]]))
+  names     <- crossing(
+    group = rownames(summary(models[[1]])$coefficients), 
+    term = colnames(summary(models[[1]])$coefficients)
+    ) %>% arrange(term, rev(group)) %>%
+    unite(term, group, term, sep = ":")
+  coefs     <- sapply(models, function(x) summary(x)$coefficients)
+  variances <- sapply(models, FUN = function(x) diag(vcov(x)))
+  rownames(coefs) <- names$term; rownames(variances) <- rownames(vcov(models[[1]]))
+  variances <- variances[names$term,]
+  
+  # average effects for each term
+  coefs_mean <- apply(coefs,     1, mean)
+  var_mean   <- apply(variances, 1, mean)
+  # variance of fixed effects
+  coefs_var <- apply(coefs, 1, var)
+  e <- t(coefs) - matrix(coefs_mean, nrow = nchains, ncol = nterms, byrow = TRUE)
+  b <- (t(e) %*% e)/(nchains - 1)
+  t <- var_mean + (1 + 1/nchains) * b
+  r <- (1 + 1/nchains) * diag(b/var_mean)
+  lambda <- (1 + 1/nchains) * diag(b/t)
+  dfcom <- df.residual(models[[1]])
+  if (is.null(dfcom)) {
+    dfcom <- 999999
+    warning("Large sample assumed.")
+  }
+  lambda[lambda < 1e-04] <- 1e-04
+  dfold <- (nchains - 1)/lambda^2
+  dfobs <- (dfcom + 1)/(dfcom + 3) * dfcom * (1 - lambda)
+  df <- dfold * dfobs/(dfold + dfobs)
+  se <- sqrt(diag(t))
+  t.val <- coefs_mean/se
+  p <- 2 * (1 - pt(abs(t.val), df = df))
+  CI = qt(.975, df = df)*se
+  fmi <- (r + 2/(df + 3))/(r + 1)
+  names(r) <- names(df) <- names(fmi) <- names(lambda) <- names$term
+  
+  fixeff <- tibble(
+    term = names$term,
+    Estimate = coefs_mean,
+    # t = t.val,
+    CI.lower = coefs_mean-CI,
+    CI.upper = coefs_mean+CI
+  ) 
+}
+```
+
+
+
+## Table Results  
+
+```{r table sel}
+nested.sel <- nested.sel %>%
+  mutate(pool = map(sel.mod, possibly(sel_pool_fun, NA_real_))) 
+
+
+
+sel.tab <- nested.sel %>%
+  select(-sel.mod) %>%
+  unnest(pool, .drop = T) %>% 
+  mutate(sig = ifelse(sign(CI.lower) == sign(CI.upper), "sig", "ns")) %>%
+  separate(term, c("group", "term"), sep = ":") %>%
+  mutate(group = mapvalues(group, c("Jail", "CommServ"), c("Incarcerated", "COV")),
+         Trait = mapvalues(Trait, traits$old, traits$breaks),
+         Trait = factor(Trait, levels = traits$breaks)) %>%
+  arrange(term) %>%
+  mutate_at(vars(Estimate, CI.lower, CI.upper), funs(exp)) %>%
+  filter(term == "value")
+
+save(sel.tab, file = sprintf("%s/results/selection_res.RData", data_path))
+
+sel.tab %>% 
+  filter(weight == "weighted") %>%
+  ggplot(aes(x = group, y = Estimate)) +
+    # scale_y_continuous(limits = c(-1,2), breaks = seq(-3,3,1))+
+    scale_color_manual(values = c("springgreen3", "blue")) +
+    geom_hline(aes(yintercept = exp(0)), linetype = "dashed") +
+    geom_errorbar(aes(ymin = CI.lower, ymax = CI.upper), width = .2, size = .75) +
+    geom_point(aes(color = group), size = 4) +
+    labs(y = "Odds", x = NULL) +
+    # coord_flip() +
+    facet_grid(.~Trait, scale = "free") +
+    theme_classic() +
+    theme(legend.position = "none",
+          axis.text = element_text(face = "bold", size = rel(1.2)),
+          axis.text.x = element_text(face = "bold", size = rel(1.2), hjust = 1, angle = 45),
+          axis.title = element_text(face = "bold", size = rel(1.2)),
+          strip.text = element_text(face = "bold", size = rel(1.2)))
+ggsave(sprintf("%s/results/plots/selection_odds.png", data_path), width = 6, height = 4)
+
+rm(nested.sel)
+```
+
+
+# Socialization Effects: Growth Models  
+## Zero Order Relationships  
+First, we look at the correlations between each of the 4 outcomes across ages.  
+
+```{r soc cors, results = 'asis', eval = T}
+r_fun <- function(df, Item){
+  print(knitr::kable(
+    (df %>% select(PROC_CID, age, value) %>%
+    spread(age, value) %>%
+    select(-PROC_CID) %>%
+    cor(., use = "pairwise")),
+    format = "html", booktabs = T, digits = 2,
+    caption = sprintf("Correlations of %s Over Ages", Item)) %>%
+    kable_styling(bootstrap_options = c("striped","repeat_header"),
+                  full_width = F))
+}
+
+pred_cor <- pred_long %>%
+  filter(!is.na(value)) %>%
+  mutate(item = mapvalues(item, traits$old, traits$new)) %>%
+  group_by(item) %>%
+  nest() 
+
+pred_cor %>%
+  mutate(r = map2(data, item, r_fun))
+```
+
+## Measurement Invariance  
+```{r Q2 functions}
+
+minv_f_fun <- function(df){
+  # number of items
+  items <- sort(as.numeric(unique(df$item_num)))
+  ager <- if(min(df$age) < 14) 12 else min(df$age)
+  setup <- crossing(item = paste0("I", items), 
+           age = seq(ager, 24, 2)-ager) %>%
+    mutate(age = paste0("T", age)) %>%
+    unite(comb, age, item, sep = "_", remove = F) %>%
+    select(-age) %>%
+    group_by(item) %>%
+    nest() %>%
+    ungroup() %>%
+    mutate(data = map(data, ~(.)$comb))
+  lind <- setup$data; names(lind) <- setup$item
+  lfac <- paste0("T", seq(ager,24,2)-ager) %>% as.list; names(lfac) <- "T"
+  
+  # basic formula setup
+  f <- map_chr(seq(ager, 24, 2)-ager, ~paste(paste0("T", .) # latent variable
+              , paste(paste0("T", .), paste0("I", items), sep = "_", collapse = " + ") # items
+              , sep = " =~ ")) %>%  # combine latent and indicators
+    paste(., collapse = "\n") # make one formula
+  
+  return(list(f = f, lind = lind, lfac = lfac))
+}
+
+mi_fun <- function(df, args){ 
+  mi.mod <- args$f; lind <- args$lind; lfac <- args$lfac
+  ager <- if(min(df$age) < 14) 12 else min(df$age)
+  df <- df %>%
+    mutate(item_num = paste0("I", item_num),
+           age = age - ager) %>%
+    pivot_wider(names_from = c("age", "item_num")
+                , values_from = "value"
+                , names_prefix = c("T"))
+    args <- list(mi.mod
+                 , data = df
+                 # , ordered = unlist(lfac)
+                 , missing = "FIML"
+                 , optim.force.converged = T
+                 , return.fit = T
+                 , longFacNames = lfac
+                 , longIndNames = lind
+                 )
+    configural <- "thresholds"; metric <- c(configural, "loadings")
+    scalar <- c(metric, "intercepts"); strict <- c(scalar, "residuals")
+    mods <- list()
+    args$long.equal = configural; 
+    mods$configural <- do.call(measEq.syntax, args)
+    args$long.equal = metric; 
+    mods$metric <-  do.call(measEq.syntax, args)
+    args$long.equal = scalar; 
+    mods$scalar <-  do.call(measEq.syntax, args)
+    args$long.equal = strict; 
+    mods$strict <- do.call(measEq.syntax, args)
+    return(mods)
+}
+```
+
+```{r}
+rep_fun <- function(df){
+   rem <- max(df$item_num)%%3
+   total <- floor(max(df$item_num)/3)
+   seqnum <- rep(1:3, times = total)
+   if(rem > 0) seqnum <- c(seqnum, 1:rem)
+   df %>%
+     mutate(item_num = mapvalues(item_num, unique(item_num), seqnum))
+}
+
+pred_items <- pred_alpha %>%
+  separate(item, c("pred", "item")) %>%
+  select(-year, -age, -value, -PROC_CID) %>% 
+  distinct() %>%
+  group_by(pred) %>%
+  mutate(item_num = as.numeric(mapvalues(item, unique(item), seq(1, length(unique(item)), 1)))) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(data = map(data, rep_fun)) %>%
+  unnest(data)
+         
+minv_nested <- pred_alpha %>%
+  separate(item, c("pred", "item")) %>%
+  select(-year) %>%
+  left_join(pred_items) %>%
+  group_by(PROC_CID, pred, age, item_num) %>%
+  summarize(value = mean(value, na.rm = T)) %>%
+  group_by(pred) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(minv_setup = map(data, minv_f_fun),
+         minv_mods = map2(data, minv_setup, mi_fun))
+```
+
+```{r}
+MI_extract_fun <- function(mods){
+  ldply(mods, fitmeasures) %>%
+    select(.id, aic, bic, cfi, rmsea, srmr) %>% 
+    mutate_at(vars(cfi, rmsea, srmr), list(delta = 
+      ~ifelse(.id == "metric", .[.id == "configural"] - .[.id == "metric"],
+      ifelse(.id == "scalar", .[.id == "metric"] - .[.id == "scalar"],
+      ifelse(.id == "strict", .[.id == "scalar"] - .[.id == "strict"], NA))))) %>%
+    bind_cols(
+      rbind(
+         rep(NA,3),
+         (anova(mods$configural, mods$metric) %>% data.frame)[2,c("Chisq.diff", "Df.diff", "Pr..Chisq.")],
+         (anova(mods$metric,     mods$scalar) %>% data.frame)[2,c("Chisq.diff", "Df.diff", "Pr..Chisq.")],
+         (anova(mods$scalar,     mods$strict) %>% data.frame)[2,c("Chisq.diff", "Df.diff", "Pr..Chisq.")]
+      ) %>% setNames(c("delta_Chisq", "delta_df", "p_Chisq"))
+    )
+}
+
+minv_nested <- minv_nested %>%
+  mutate(res = map(minv_mods, MI_extract_fun))
+save(minv_nested, file = sprintf("%s/results/meas_inv.RData", data_path))
+minv_nested <- minv_nested %>% select(pred, res)
+save(minv_nested, file = sprintf("%s/results/meas_inv_small.RData", data_path))
+```
+
+```{r}
+comb <- paste(rep(traits$old, each = 3),
+              rep(c("cfi", "rmsea", "srmr"), times = 4), sep = ".") 
+
+minv_nested %>% 
+  unnest(res) %>% 
+  # filter(.id == "metric") %>%
+  select(pred, type = .id, cfi, rmsea, srmr, cfi_delta, rmsea_delta, delta_Chisq, p_Chisq) %>%
+  unite(tmp, Trait, measure, sep = ".") %>%
+  mutate(tmp = factor(tmp, levels = comb),
+         Event = mapvalues(Event, c("none", events$old_event), c("Mean", events$new_event)),
+         Event = factor(Event, levels = c("Mean", events$new_event))) %>%
+  spread(tmp, value) %>%
+  arrange(Event) %>%
+  # select(-.id) %>%
+  kable(., "html", booktabs = T, escape = F, digits = 2,
+        col.names = c("Event", rep(c("CFI", "RMSEA", "SRMR"), time = 5))) %>%
+  kable_styling(full_width = F) %>%
+  add_header_above(c(" " = 1, "Extraversion" = 3, "Agreeableness" = 3,
+                     "Conscientiousness" = 3, "Emotional Stability" = 3,
+                     "Openness" = 3))
+```
+
+
+
+
+
+## Basic Models  
+Next, we fit the growth models with and without weights for each of the 4 outcomes (CESD, Impulsivity, Sensation Seeking, and Self Esteem) using a linear of the following forms.  
+
+<strong?Linear:</strong>
+<ul>
+  <li><strong>Level 1:</strong> $Y_{ij} = \beta_{0j} + \beta_{1j}*age0_{ij} + \varepsilon{ij}$
+  <li> <strong>Level 2:</strong> 
+    <ul> 
+      <li> $\beta_{0j} = \gamma_{00} + \gamma_{01}*D1 + \gamma_{02}*D2 + U_{0j}$
+      <li> $\beta_{1j} = \gamma_{10} + \gamma_{11}*D1 + \gamma_{12}*D2 + U_{1j}$
+    </ul>
+<ul>
+    
+Variable  | D1  | D2  
+--------- | --- | ---
+None      | 0   | 0
+Jail      | 1   | 0
+CommServ  | 0   | 1 
+
+Then, to see if the timing of the event has a substantive impact on trajectories of change, we will run a series of not-preregistered non-linear multilevel spline models.  
+
+First, to compare whether the trajectory of those who experience either incarceration and community service differs from those who don't (i.e. a change point), we will run the following model:  
+<ul>
+  <li><strong>Level 1:</strong> $Y_{ij} = \beta_{0j} + \beta_{1j}*time0_{ij} + \beta_{2j}*D_{ij} + \beta_{3j}*time0_{ij}*D_{ij} +  \varepsilon{ij}$
+  <li> <strong>Level 2:</strong> 
+    <ul> 
+      <li> $\beta_{0j} = \gamma_{00} + \gamma_{01}*age_j +  U_{0j}$ <!--intercept-->
+      <li> $\beta_{1j} = \gamma_{10} +  + \gamma_{01}*age_j + U_{1j}$ <!--slope of the control group-->
+      <li> $\beta_{2j} = \gamma_{20}$ <!--difference in intercepts between groups-->
+      <li> $\beta_{3j} = \gamma_{30}$ <!--difference in slopes between groups-->
+    </ul>
+</ul>
+
+Second, to compare (1) whether any contact with the criminal justice system impacts trajectories of change and (2) whether trajectories differ depending on court ordered community service versus incarceration, we will the following model:  
+<ul>
+  <li><strong>Level 1:</strong> $Y_{ij} = \beta_{0j} + \beta_{1j}*time0_{ij} + \beta_{2j}*D1_{ij} + \beta_{3j}*D2_{ij} + \beta_{4j}*time0_{ij}*D1_{ij} + \beta_{5j}*time0_{ij}*D2_{ij} +  \varepsilon{ij}$
+  <li> <strong>Level 2:</strong> 
+    <ul> 
+      <li> $\beta_{0j} = \gamma_{00} + \gamma_{01}*age_j +  U_{0j}$ <!--intercept-->
+      <li> $\beta_{1j} = \gamma_{10} +  + \gamma_{01}*age_j + U_{1j}$ <!--slope of the control group-->
+      <li> $\beta_{2j} = \gamma_{20}$ <!--difference in intercepts between contact and no contact groups-->
+      <li> $\beta_{3j} = \gamma_{30}$ <!--difference in slopes between contact and no contact groups-->
+      <li> $\beta_{4j} = \gamma_{40}$ <!--difference in intercepts between community service and incarceration groups-->
+      <li> $\beta_{5j} = \gamma_{50}$ <!--difference in slopes between community service and incarceration groups-->
+    </ul>
+</ul>
+
+### Define Groups  
+```{r def soc groups}
+pred_groups <- pred_long %>%
+  select(PROC_CID, item, age, year) %>%
+  distinct() %>%
+  right_join(groups_tv) %>%
+  mutate(tv = ifelse(is.na(cont_year) | year < cont_year, 0, 1),
+         ## create groups
+         jailcomm_tv = ifelse(groups %in% c("Jail", "CommServ") & tv == 1, 1, 0),
+         jail_tv = ifelse(groups == "Jail" & tv == 1, 1, 0),
+         comm_tv = ifelse(groups == "CommServ" & tv == 1, 1, 0)) %>%
+  group_by(PROC_CID, groups, item) %>%
+  mutate(lin_cent = ifelse(!is.na(cont_year), year - cont_year, year - max(year)),
+         antic_lin = ifelse(lin_cent < 0, lin_cent, 0),
+         social_lin = ifelse(lin_cent > 0, lin_cent, 0),
+         frstyear = ifelse(!is.na(cont_year) & year %in% c(cont_year, cont_year + 2), 1, 0)) %>%
+  ungroup()
+         ## create change variables
+```
+
+## Setup Data   
+### Basic Linear Growth Model  
+```{r}
+load(sprintf("%s/results/psw_small.RData", data_path))
+
+save_fun <- function(d, chain, item){
+  save(d, file = sprintf("%s/data/model_data/linear/%s_%s_threegroup.RData", data_path, item, chain))
+}
+
+imp.data.psw <- nested.psw %>% 
+  filter(match_set == "socialization") %>%
+  unnest(imp.data.long) %>%
+  gather(key = item, value = T1_value, CESD:Impls) %>%
+  full_join(pred_long) %>%
+  mutate(age0 = age0/5, 
+         wave0 = (year - 1994)/5) %>%
+  filter(!is.na(chain))
+
+imp.data.psw %>%
+  left_join(pred_groups %>% select(PROC_CID, item, cont_age, cont_year)) %>%
+  group_by(chain, match_set, PROC_CID, item) %>%
+  mutate(age_baseline = min(age, na.rm = T)) %>%
+  group_by(chain, match_set, item) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(data = pmap(list(data, chain, item), save_fun))
+```
+
+### Two-Group Model  
+```{r}
+save_fun <- function(d, chain, item, target){
+  save(d, file = sprintf("%s/data/model_data/spline/%s_%s_%s.RData", data_path, item, chain, target))
+}
+
+tgd <- imp.data.psw %>%
+  full_join(pred_groups %>% select(PROC_CID:year, groups, tv_group = jail_tv, cont_age, antic_lin:frstyear)) %>%
+  filter(groups %in% c("None", "Jail")) %>%
+  mutate(Target = "Jail") %>%
+  filter(!is.na(chain) & !is.na(item) & !is.na(value)) %>%
+  full_join(
+    imp.data.psw %>%
+      full_join(pred_groups %>% select(PROC_CID:year, groups, tv_group = comm_tv, cont_age, antic_lin:frstyear)) %>%
+      filter(groups %in% c("None", "CommServ")) %>%
+      mutate(Target = "CommServ") %>% 
+      filter(!is.na(chain) & !is.na(item) & !is.na(value))) %>%
+  group_by(chain, match_set, PROC_CID, item) %>%
+  mutate(age_baseline = min(age, na.rm = T)) %>%
+  ungroup()
+
+tgd %>%
+  group_by(chain, match_set, item, Target) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(data = pmap(list(data, chain, item, Target), save_fun))
+
+nl2g_ages <- tgd %>%
+  select(chain, match_set, PROC_CID, groups, item, cont_age, age_baseline, Target) %>%
+  distinct() %>%
+  group_by(match_set, item, Target) %>%
+  summarize_at(vars(cont_age, age_baseline), mean, na.rm = T) %>%
+  ungroup() %>%
+  mutate(diff = age_baseline - cont_age,
+         cont_age0 = cont_age - 14)
+save(nl2g_ages, file = sprintf("%s/data/age_data.RData", data_path))
+```
+
+## Define Functions  
+### Model Functions  
+```{r soc funs, eval = F}
+mod_fun <- function(dv, psw.Weights, Form, Groups){
+  print(paste(dv, psw.Weights, Form, sep = " "))
+  mods <- lapply(1:10, function(x){
+    lmer_fun(X = x, DV = dv, PSW.Weights = psw.Weights, form = Form, groups = Groups)})
+  p_vcov <- pool_vcov(mods)
+  save(p_vcov, file = sprintf("%s/results/%s/vcov/%s_%s_%s_none.RData",
+                         data_path, Form, psw.Weights, dv, Groups))
+  se <- se_fun(p_vcov)
+  save(se, file = sprintf("%s/results/%s/se/%s_%s_%s_none.RData",
+                         data_path, Form, psw.Weights, dv, Groups))
+  p <- pool_fun(mods)
+  save(p, file = sprintf("%s/results/%s/pooled/%s_%s_%s_none.RData",
+                         data_path, Form, psw.Weights, dv, Groups))
+  p_re <- pooled_re_fun(mods)
+  save(p_re, file = sprintf("%s/results/%s/pooled_re/%s_%s_%s_none.RData",
+                         data_path, Form, psw.Weights, dv, Groups))
+  load(sprintf("%s/results/age_data.RData", data_path))
+  age_diff <- if (Form != "linear") {(nl2g_ages %>% filter(item == dv & Target == Groups))$diff} else {NA}
+  hypoth <- hyp_tests(mods, Form, Groups, age_diff)
+  save(hypoth, file = sprintf("%s/results/%s/hypoth/%s_%s_%s_none.RData",
+                         data_path, Form, psw.Weights, dv, Groups))
+  rm(list = c("mods", "p_vcov", "se", "p", "p_re", "hypoth"))
+  gc()
+  return(NULL)
+}
+
+# short function for running models
+lmer_fun <- function(X, DV, PSW.Weights, form, groups){
+  load(sprintf("%s/data/model_data/%s/%s_chain.%s_%s.RData", data_path, form, DV, X, groups))
+  if(PSW.Weights == "weighted"){pw <- d$psw.weights}
+  else{pw <- rep(1, nrow(d))}
+  mage <- mean((d %>% select(PROC_CID, age_baseline) %>% distinct())$age_baseline, na.rm = T)
+  d <- d %>% 
+    group_by(PROC_CID) %>% 
+    mutate(age_c = age - mage) %>% 
+    ungroup() %>% 
+    mutate(groups = fct_relevel(groups, "None")) 
+  cl <- lmerControl(check.conv.grad     = .makeCC("ignore", tol = 2e-2, relTol = NULL),
+    check.conv.singular = .makeCC(action = "ignore",  tol = 1e-2),
+    check.conv.hess     = .makeCC(action = "ignore", tol = 1e-3),
+    check.scaleX = c("ignore"))
+  y <- if(form == "linear"){
+    lmer(value ~ T1_value + age0*groups + (age0 | PROC_CID)
+         ,  data = d, weights = pw, control = cl)
+  } else{
+    lmer(value ~ age0 + antic_lin + social_lin + frstyear + tv_group + groups + antic_lin:groups + (age0 | PROC_CID)
+         , data = d, weights = pw, control = cl)
+  }
+  save(y, file = sprintf("%s/results/%s/models/%s_%s_chain.%s_%s_none.RData", data_path, form, PSW.Weights, DV, X, groups))
+  gc()
+  return(y)
+}
+```
+
+### Pool Models  
+Next, we pool results across models. Below is a longish function for pooling the fixed and random effects of the models of the imputed datasets.  
+
+```{r run soc pools, eval = T}
+pool_fun <- function(model){
+  nchains <- length(model)
+#####
+  ### Get FE's and RE's for pooling FE's across imputations ###
+####
+  fixeffs <- sapply(model, lme4::fixef)
+  raneffs <- sapply(model, function(z) diag(matrix(vcov(summary(z))@x, 
+                                                   nrow(fixeffs))))
+  res <- sapply(model, function(z){(broom.mixed::tidy(z) %>% filter(term == "sd__(Intercept)"))$estimate})
+  
+  R2 <- sapply(model, MuMIn::r.squaredGLMM)
+  rownames(R2) <- c("R2m", "R2c")
+  rownames(raneffs) <- rownames(fixeffs)
+
+  # average effects for each term
+  fixeff_mean <- apply(fixeffs, 1, mean)
+  raneff_mean <- apply(raneffs, 1, mean)
+  R2_mean     <- apply(R2,      1, mean)
+  sd_re     <- mean(res)
+  
+  # variance of fixed effects
+  fixeff_var <- apply(fixeffs, 1, var)
+  
+  T <- raneff_mean + (1 + nchains^(-1)) * fixeff_var # ??
+  r <- (1 + nchains^(-1)) * fixeff_var/raneff_mean# RIV value 
+  df <- (nchains - 1) * (1 + r^(-1))^2
+  se <- sqrt(T)
+  t.val <- fixeff_mean/se
+  p <- 2 * (1 - pt(abs(t.val), df = df))
+  CI = qt(.975, df = df)*se
+  #FMI value fmi <- (r + 2/(df + 3))/(r + 1)
+  
+  CI_fun <- function(mod){
+    CI <- confint.merMod(mod
+                         , method = "boot"
+                         , nsim = 5
+                         , parallel = "multicore"
+                         , oldNames = F)
+    CI <- data.frame(CI) %>% mutate(term = rownames(.))
+  }
+  
+    # variance and correlation components
+  res <- tibble(chain = 1:10,
+         model = model) %>%
+    mutate(mod_tab = map(model, function(z) {
+      tbl_df(broom::tidy(z)) %>% dplyr::filter(group != "fixed")}),
+      CI = map(model, CI_fun))
+  CI_ran <- res %>% select(chain, CI) %>%
+    unnest(CI) %>%
+    setNames(c("chain", "CI.lower", "CI.upper", "term")) %>%
+    filter(grepl("PROC_CID", term) | grepl("sigma", term)) %>%
+    group_by(term) %>%
+    summarize_at(vars(CI.lower, CI.upper), mean) %>%
+    ungroup() %>%
+    mutate(CI.lower = CI.lower^2, CI.upper = CI.upper^2,
+           term = str_remove_all(term, "\\|PROC_CID"),
+           term = str_replace_all(term, "_", "__"),
+           term = str_replace_all(term, "wave0.\\(Intercept\\)", "(Intercept).wave0"),
+           term = str_replace_all(term, "age0.\\(Intercept\\)", "(Intercept).age0")) 
+  raneff <- res %>% 
+    select(chain, mod_tab) %>%
+    unnest(mod_tab) %>% 
+    group_by(term, group) %>% 
+    summarize(Estimate = mean(estimate, na.rm = T)) %>%
+    ungroup() %>%
+    mutate(type = "raneff",
+           term = ifelse(term == "sd__Observation", "sigma", term)) %>%
+    full_join(CI_ran) %>%
+    select(-group)
+  
+  fixeff <- tibble(
+    type = rep("fixeff",nrow(fixeffs)),
+    term = names(fixeff_mean),
+    Estimate = fixeff_mean,
+    t = t.val,
+    CI.lower = fixeff_mean - CI[names(fixeff_mean)],
+    CI.upper = fixeff_mean + CI[names(fixeff_mean)],
+    p = p,
+    d = fixeff_mean/rep(sd_re, length(fixeff_mean))
+  )
+  
+  # sum_mod <- tibble(
+  #   type = rep("summary", 2)
+  #   , term = c("R2m", "R2c")
+  #   , Estimate = c(R2_mean[1], R2_mean[2])
+  # )
+  
+  results <- fixeff %>% full_join(raneff) #%>% full_join(sum_mod)
+}
+```
+
+### Pooled Random Effects  
+For plotting individual trajectories and effect sizes, we need random effects. So we pool those across models
+```{r}
+# short function for pooling each person's random effects of the models
+pooled_re_fun <- function(mods){
+  tibble(chain = 1:10,
+         coef = llply(mods, function(y){
+           z <- coef(y)$PROC_CID
+           z <- tbl_df(z) %>% mutate(PROC_CID = as.numeric(row.names(z))) })) %>%
+    unnest(coef) %>%
+    group_by(PROC_CID) %>%
+    summarize_at(vars(-chain), funs(mean)) 
+}
+```
+
+### Pooled `vcov()` Matrix  
+To plot confidence bands around trajectories, we're going to need the variance-covariance matrix. So we pool those across imputations.  
+```{r}
+pool_vcov <- function(model){
+  nvar <- nrow(vcov(model[[1]]))
+  varnames <- str_replace_all(colnames(vcov(model[[1]])), "[()]", "")
+  vcov_sum <- sapply(model, function(z) matrix(vcov(summary(z))@x, nvar))
+  vcov_mean <- matrix(apply(vcov_sum, 1, mean), nrow = nvar)
+  colnames(vcov_mean) <- varnames; rownames(vcov_mean) <- varnames
+  return(vcov_mean)
+}
+```
+
+### Standard Error Function  
+To unpack the cross-level interactions, we need the standard errors. We use the method from Preacher and Curran (2006).  
+```{r}
+se_fun <- function(vcov_mat){
+  se_map <- function(vcov, parameter, w){
+    z <- 1
+    vcov[parameter, parameter] + 2 * z * vcov[parameter, w] + z^2 * vcov[w, w]
+  }
+  cols <- colnames(vcov_mat)
+  x <- cols[(grepl("age0", cols) | grepl("wave0", cols)) & !grepl(":", cols)]
+  m <- cols[(grepl("group", cols) | grepl("tv", cols)) & !grepl(":", cols)]
+  se <- crossing(
+    parameter = c("Intercept", x),
+    term = m
+  ) %>% as_tibble() %>%
+    mutate(se = map2_dbl(parameter, term, ~se_map(vcov_mat, .x, .y)),
+           parameter = str_replace(parameter, "0", ""),
+           term = str_replace(term, "groups", ""), 
+           parameter = ifelse(parameter == "Intercept", parameter, "Slope"))
+return(se)
+}
+```
+
+### Hypothesis Tests  
+We want to get individual slope estimates for each Group for each trait. To get the confidence intervals around them in addition to their estimates, we use the `glht()` function from the `multcomp` package.  
+```{r hyp test}
+hyp_tests <- function(mods, ml, gr){
+  int_hyp_fun <- function(mod, ml){
+    if(ml == "linear"){
+      h <- rbind(c(1,0,0,0,0,0,0), # Neither Intercept
+                 c(0,0,1,0,0,0,0), # Neither Linear Slope
+                 c(1,0,0,1,0,0,0), # Jail Intercept
+                 c(0,0,1,0,0,1,0), # Jail Linear Slope
+                 c(1,0,0,0,1,0,0), # Comm Serv Intercept 
+                 c(0,0,1,0,0,0,1)) # Comm Serv Quadratic Slope
+      row.names(h) <- c("Neither_Int", "Neither_Slope", "Incarceration_Int", "Incarceration_Slope", "CommServ_Int", "CommServ_Slope")
+    } else {
+      h <- rbind(c(1,0,0,0,0,0,0,0), # intercept of control group "pre"
+                 c(1,0,0,0,1,0,0,0), # intercept of contact pre
+                 c(1,0,0,1,1,0,0,0), # intercept of contact post
+                 c(0,0,0,0,1,0,0,0), # difference in intercepts between groups "pre"
+                 c(0,0,0,1,1,0,0,0), # difference in intercepts between groups "post"
+                 c(0,0,0,1,0,0,0,0), # difference in intercepts pre-post
+                 c(0,1,0,0,0,0,0,0), # slope of control group
+                 c(0,1,0,0,0,1,0,0), # slope of the contact groups pre
+                 c(0,1,0,0,0,1,0,1), # slope of the contact groups post
+                 c(0,0,0,0,0,1,0,0), # difference in slopes between groups "pre"
+                 c(0,0,0,0,0,1,0,1), # difference in slopes between groups "post"
+                 c(0,0,0,0,0,0,0,1)) # difference in slopes pre-post
+      
+      row.names(h) <- c("Neither_Int", "Either_PreInt", "Either_PostInt",
+                        "Diff_PreInt", "Diff_PostInt", "Diff_PrePostInt", 
+                        "Neither_Slope", "Either_PreSlope", "Either_PostSlope",
+                        "Diff_PreSlope", "Diff_PostSlope", "Diff_PrePostSlope")
+    }
+    h  <- multcomp::glht(mod, h)
+    ci <- confint(h, calpha = multcomp::univariate_calpha()) 
+    res <- ci$confint %>% data.frame() %>% mutate(term = row.names(.))
+  }
+  # debug(int_hyp_fun)
+  tibble(chain = 1:10, models = mods) %>%
+    mutate(h = map(mods, ~int_hyp_fun(., ml))) %>%
+    unnest(h) %>%
+    group_by(term) %>%
+    summarise_at(vars(Estimate:upr), funs(mean(., na.rm = T)))
+}
+```
+
+## Run Models  
+
+```{r, eval = F}
+plan(multisession(workers = 3L))
+nested.mods <- crossing(
+  pred = unique(traits$old),
+  mod = c("linear", "spline"),
+  groups = c("Jail", "CommServ", "threegroup"),
+  weighted = c("weighted", "unweighted")
+  ) %>%
+  filter(!(mod == "linear" & groups %in% c("Jail", "CommServ")) & 
+         !(mod == "spline" & groups == "threegroup")) %>%
+  arrange(groups, mod, weighted, pred) %>%
+  # full_join(done) %>%
+  # filter(is.na(done)) %>%
+  mutate(models = future_pmap(
+    list(pred, weighted, mod, groups)
+    , .f = mod_fun
+    , .progress = T))
+closeAllConnections()
+gc()
+
+```
+
+## Load Results    
+Now, we actually pool the fixed and random effects, both for average effects, as well for individual participants, using the functions we defined above.  
+
+```{r}
+loadRData <- function(fileName, form, type, obj){
+#loads an RData file, and returns it
+    path <- sprintf("%s/results/%s/%s/%s_none.RData", data_path, form, type, fileName)
+    load(path)
+    get(ls()[grepl(obj, ls())])
+}
+
+nested.mods <- crossing(
+  pred = unique(traits$old),
+  mod = c("linear", "spline"),
+  groups = c("Jail", "CommServ", "threegroup"),
+  weighted = c("weighted", "unweighted")
+  ) %>%
+  filter(!(mod == "linear" & groups %in% c("Jail", "CommServ")) & 
+         !(mod == "spline" & groups == "threegroup")) %>%
+  unite(file, weighted, pred, groups, sep = "_", remove = F) %>%
+  mutate(pool = map2(file, mod, ~loadRData(.x, .y, "pooled", "p")),
+         pool_re = map2(file, mod, ~loadRData(.x, .y, "pooled_re", "p_re")),
+         se = map2(file, mod, ~loadRData(.x, .y, "se", "se")),
+         vcov = map2(file, mod, ~loadRData(.x, .y, "vcov", "p_vcov")),
+         hypoth = map2(file, mod, ~loadRData(.x, .y, "hypoth", "hypoth")))
+```
+
+```{r}
+loadRData <- function(path, obj){
+#loads an RData file, and returns it
+    load(path)
+    get(ls()[grepl(obj, ls())])
+}
+
+grab_fun <- function(dv, mod, groups, weight){
+  mods <- (tibble(chain = 1:10) %>%
+    mutate(path = sprintf("%s/results/%s/models/%s_%s_chain.%s_%s_none.RData", data_path, mod, weight, dv, chain, groups),
+           mods = map(path, ~loadRData(., "y"))))$mods
+  hypoth <- hyp_tests(mods, mod, groups)
+  save(hypoth, file = sprintf("%s/results/%s/hypoth/%s_%s_%s_none.RData",
+                         data_path, mod, weight, dv, groups))
+}
+
+
+crossing(
+  pred = unique(traits$old),
+  mod = c("linear", "spline"),
+  groups = c("Jail", "CommServ", "threegroup"),
+  weighted = c("weighted", "unweighted")
+  ) %>%
+  filter(mod != "linear" & groups != "threegroup") %>%
+  mutate(pmap(list(pred, mod, groups, weighted), grab_fun))
+```
+
+## Tables  
+
+```{r}
+sd_re <- nested.mods %>% 
+  select(pred:weighted, pool_re) %>%
+  unnest(pool_re) %>%
+  full_join(group_wide %>% select(PROC_CID, Group = groups)) %>%
+  filter(Group == "None") %>%
+  group_by(pred, mod, groups, weighted) %>%
+  summarize(sd_re = sd(`(Intercept)`, na.rm = T)) %>%
+  ungroup() %>%
+  filter(complete.cases(.))
+
+d <- nested.mods %>% 
+  select(pred:weighted, pool) %>%
+  unnest(pool) %>%
+  filter(grepl(":", term) & !grepl(":age", term)) %>%
+  filter(weighted == "weighted") %>% 
+  left_join(sd_re) %>%
+  mutate(d = Estimate/sd_re, 
+         term = ifelse(grepl("tv_gro", term), str_replace(term, "tv_group", groups), term),
+         group = ifelse(grepl("ail", term), "Incarceration", "Comm Serv"), 
+         group = ifelse(grepl("jailcomm", term), "Both", group),
+         # group = ifelse(is.na(group) == T, "Comm Serv", "Incarceration"),
+         sig = ifelse(p < .05, "sig", "ns"), 
+         groups = ifelse(groups == "Jail", "Incarceration", groups)) %>%
+  select(pred, mod, d, groups, group, sig)
+
+levs <- c("Neither.b", "Neither.CI", paste(rep(c("Incarceration", "Comm Serv"), each = 3), rep(c("b", "CI", "d"), times = 2), sep = "."), "Both.b", "Both.CI", "Both.d")
+
+slopes.tab <- nested.mods %>% 
+  filter(mod == "linear")  %>%
+  select(pred:weighted, hypoth) %>% 
+  unnest(hypoth) %>%
+  separate(term, c("group", "term"), sep = "_") %>%
+  filter(weighted == "weighted") %>% 
+  filter(grepl("Slope", term)) %>%
+  mutate(group = ifelse(group == "CommServ", "Comm Serv", group)) %>%
+  # select(-groups) %>%
+  left_join(d %>% filter(mod == "linear")) %>%
+  mutate_at(vars(Estimate:upr, d), funs(ifelse(!is.na(.) == T, sprintf("%.2f", .), ""))) %>%
+  mutate(d = ifelse(sig == "sig", sprintf("<strong>%s</strong>", d), d),
+         CI = sprintf("[%s, %s]", lwr, upr)) %>%
+  select(pred, mod, groups, group, Estimate, d, CI) %>%
+  rename(b = Estimate) %>%
+  gather(key = est, value = value, b, CI, d, na.rm = T) %>%
+  unite(tmp, group, est, sep = ".") %>%
+  mutate(tmp = factor(tmp, levels = levs)) %>%
+  arrange(pred, tmp) %>%
+  pivot_wider(names_from = tmp, values_from = value)
+```
+
+```{r}
+nested.mods %>%
+  filter(mod == "linear") %>%
+  select(pred:weighted, pool) %>%
+  unnest(pool) %>%
+  filter(grepl("age0:", term)) %>%
+  mutate(est = sprintf("b = %.2f; 95%% CI [%.2f, %.2f]", Estimate, CI.lower, CI.upper),
+         sig = ifelse(sign(CI.lower) == sign(CI.upper), "sig", "ns")) %>%
+  select(pred, weighted, term, est, sig) %>%
+  arrange(weighted, pred)
+```
+
+
+### Linear Slopes    
+```{r}
+lin.tab <- slopes.tab  %>%
+  mutate(pred = factor(pred, traits$old, traits$new)) %>%
+  arrange(pred) %>%
+  select(-mod, -groups, -contains("Both")) %>%
+  kable(.
+        , "html"
+        , escape = F
+        , col.names = c(" ", "<em>b</em>", "CI", "<em>b</em>", "CI", "<em>d</em>", "<em>b</em>", "CI", "<em>d</em>")
+        , align = c("r", rep("c", 8))
+        , caption = "<strong>Table X</strong><br><em>Mean Personality Trait Change or Incarceration, Court-Ordered Community Service, and Neither Participants</em>") %>% 
+  kable_styling(full_width = F) %>%
+  add_header_above(c(" " = 1, "Neither" = 2, "Incarceration" = 2, " " = 1, "Community Service" = 2, " " = 1)) %>%
+  add_footnote("Note. The reference group was individuals neither in the Incarceration nor Court-Ordered Community Service groups. Cohen's d is calculated by dividing the difference in mean slope between groups by the standard deviation of the random intercepts of personality scores at age 14. CI = confidence interval. Bolded values represent estimated mean differences in change between groups whose CIs do not overlap with 0.", notation = "none")
+
+lin.tab
+
+save_kable(lin.tab, file = sprintf("%s/results/tables/linear/slopes_tab.html", data_path))
+
+
+```
+
+### Nonlinear Levels  
+```{r}
+levs <- paste(rep(traits$old, each = 2), rep(c("Level", "Diff"), times = 4), sep = "_")
+
+nl2g_lev <- nested.mods %>%
+  filter(weighted == "weighted" & groups != "threegroups" & mod == "spline") %>%
+  select(pred:groups, hypoth) %>%
+  unnest(hypoth) %>%
+  filter(!grepl("Slope", term)) %>%
+  mutate(term = str_replace_all(term, "Either", groups),
+         est = sprintf("%.2f<br>[%.2f, %.2f]", Estimate, lwr, upr),
+         sig = ifelse(sign(lwr) == sign(upr), "sig", "ns"),
+         est = ifelse(sig == "sig" & grepl("Diff", term), sprintf("<strong>%s</strong>", est), est)) %>%
+  select(-(Estimate:upr), -sig) %>%
+  separate(term, c("Group", "term"), sep = "_") %>%
+  filter(!(term == "PreInt" & Group == "Diff")) %>%
+  mutate(term2 = mapvalues(term, c("Int", "PrePostInt", "PostInt", "PreInt"), c("Pre", "Pre", "Post", "Pre")),
+         model = groups,
+         groups = ifelse(Group == "Diff", "Diff", "Level"),
+         term2 = ifelse(term == "Int" & Group == "Neither", "None", term2),
+         term2 = ifelse(Group == "Diff", ifelse(term == "PrePostInt", "Pre", "None"), term2)) %>%
+  select(pred, model, groups, term2, est) %>%
+  pivot_wider(names_from = c("pred", "groups"),
+              values_from = "est"
+              , names_sep = "_") %>%
+  mutate(model = forcats::fct_rev(factor(model)),
+         term2 = factor(term2, c("None", "Pre", "Post"))) %>%
+  arrange(model, term2) %>%
+  select(model, term2, levs)
+
+nl2g_lev_tab <- nl2g_lev %>%
+  select(-model) %>%
+  kable(., "html"
+        , escape = F
+        , col.names = c("Term", rep(c("Level<br><em>b</em> [CI]", "Difference<br><em>b</em> [CI]"), times = 4))
+        , align = c("r", rep("c", 8))
+        , caption = "<strong>Table X</strong><br><em>Estimated Levels Across Groups at Average Contact Points and Differences Between Groups and Across Contact Points") %>%
+  kable_styling(full_width = F) %>%
+  kableExtra::group_rows("Incarceration", 1, 3) %>%
+  kableExtra::group_rows("Community Service", 4, 6) %>%
+  add_header_above(c(" " = 1, "Sensation Seeking" = 2, "Impulsivity" = 2, "Depressive Symptoms" = 2, 
+                     " Self-Esteem" = 2)) %>%
+  add_footnote(notation = "none"
+               , label = "Note. None, Pre, and Post Levels indicate estimated average levels in the no contact group (None) or before (Pre) and after (Post) contact in the contact groups. The Difference columns indicate estimated differences in average levels. The ''None'' row indicates the difference between the no contact and contact groups at the average age and wave of contact (i.e. post contact), while the ''Pre'' row indicates the difference in the contact group before and after contact at average wave and age of contact. Bold values in the Difference Column indicate 95% confidence intervals do not overlap with 0.")
+
+nl2g_lev_tab
+
+save_kable(nl2g_lev_tab, file = sprintf("%s/results/tables/spline/twogroups_levels_tab.html", data_path))
+```
+
+
+### Nonlinear Slopes  
+```{r}
+levs <- paste(rep(traits$old, each = 2), rep(c("Level", "Diff"), times = 4), sep = "_")
+
+nl2g_slope <- nested.mods %>%
+  filter(weighted == "weighted" & groups != "threegroups" & mod == "spline") %>%
+  select(pred:groups, hypoth) %>%
+  unnest(hypoth) %>%
+  filter(grepl("Slope", term)) %>%
+  mutate(term = str_replace_all(term, "Either", groups),
+         est = sprintf("%.2f<br>[%.2f, %.2f]", Estimate, lwr, upr),
+         sig = ifelse(sign(lwr) == sign(upr), "sig", "ns"),
+         est = ifelse(sig == "sig" & grepl("Diff", term), sprintf("<strong>%s</strong>", est), est)) %>%
+  select(-(Estimate:upr), -sig) %>%
+  separate(term, c("Group", "term"), sep = "_") %>%
+  filter(!(term == "PreSlope" & Group == "Diff")) %>%
+  mutate(term2 = mapvalues(term, c("Slope", "PrePostSlope", "PostSlope", "PreSlope"), c("Pre", "Pre", "Post", "Pre")),
+         model = groups,
+         groups = ifelse(Group == "Diff", "Diff", "Level"),
+         term2 = ifelse(term == "Slope" & Group == "Neither", "None", term2),
+         term2 = ifelse(Group == "Diff", ifelse(term == "PrePostSlope", "Pre", "None"), term2)) %>%
+  select(pred, model, groups, term2, est) %>%
+  pivot_wider(names_from = c("pred", "groups"),
+              values_from = "est"
+              , names_sep = "_") %>%
+  mutate(model = forcats::fct_rev(factor(model)),
+         term2 = factor(term2, c("None", "Pre", "Post"))) %>%
+  arrange(model, term2) %>%
+  select(model, term2, levs)
+
+nl2g_slope_tab <- nl2g_slope %>%
+  select(-model) %>%
+  kable(., "html"
+        , escape = F
+        , col.names = c("Term", rep(c("Level<br><em>b</em> [CI]", "Difference<br><em>b</em> [CI]"), times = 4))
+        , align = c("r", rep("c", 8))
+        , caption = "<strong>Table X</strong><br><em>Estimated Slopes Across Groups at Average Contact Points and Differences Between Groups and Across Contact Points") %>%
+  kable_styling(full_width = F) %>%
+  kableExtra::group_rows("Incarceration", 1, 3) %>%
+  kableExtra::group_rows("Community Service", 4, 6) %>%
+  add_header_above(c(" " = 1, "Sensation Seeking" = 2, "Impulsivity" = 2, "Depressive Symptoms" = 2, 
+                     " Self-Esteem" = 2)) %>%
+  add_footnote(notation = "none"
+               , label = "Note. None, Pre, and Post slopes indicate estimated average slopes in the no contact group (None) or before (Pre) and after (Post) contact in the contact groups. The Difference columns indicate estimated differences in average trajectories. The ''None'' row indicates the difference between the no contact and contact groups at the average age and wave of contact (i.e. post contact), while the ''Pre'' row indicates the difference in the contact group before and after contact at average wave and age of contact. Bold values in the Difference Column indicate 95% confidence intervals do not overlap with 0.")
+
+nl2g_slope_tab
+
+save_kable(nl2g_slope_tab, file = sprintf("%s/results/tables/spline/twogroups_slopes_tab.html", data_path))
+```
+
+```{r}
+nested.mods %>%
+  filter(mod == "spline" & weighted == "weighted") %>%
+  select(pred:weighted, pool) %>%
+  unnest(pool) %>%
+  filter(grepl("age", term)) %>%
+  arrange(term, pred, groups)
+```
+
+## Results Plots  
+### Fixed Effects  
+Next, we plot the results by extracting the coefficients from the models and using the simple slopes for each of the groups. 
+
+```{r soc plots}
+traits <- tibble(
+  old = c("SensSeek", "Impls", "CESD", "SelfEstm"),
+  new = c("Sensation Seeking", "Impulsivity", "Depressive Symptoms", "Self-Esteem"),
+  breaks = c("Sensation\nSeeking", "Impulsivity", "Depressive Symptoms", "Self-\nEsteem")
+)
+
+sig <- nested.mods %>% 
+  filter(mod == "linear" & weighted == "weighted") %>% 
+  unnest(pool) %>%
+  filter(grepl(":", term)) %>%
+  mutate(sig = ifelse(p < .05, "sig", "ns"),
+         term = str_replace(term, "age0:groups", ""),
+         term = str_replace(term, "groups", ""),
+         term = str_replace(term, ":age0", "")) %>%
+  select(pred, term, sig) %>%
+  full_join(crossing(pred = unique(.$pred), term = "None")) %>% 
+  group_by(pred) %>%
+  mutate(sig = ifelse(grepl("None",term) == T & (sig[term == "Jail"] == "sig" | sig[term == "CommServ"] == "sig"), "sig",
+               ifelse(grepl("None", term) == T & (sig[term == "Jail"] == "ns" & sig[term == "CommServ"] == "ns"), "ns", sig))) %>%
+  ungroup() 
+
+raneff_slopes <- nested.mods %>% 
+  filter(weighted == "weighted" & mod == "linear") %>%
+  select(pred, mod, weighted, pool_re) %>%
+  unnest(pool_re) %>% 
+  left_join(group_wide %>% select(PROC_CID, groups)) %>% 
+  mutate_if(is.numeric, funs(ifelse(is.na(.) == T, 0, .))) %>%
+  mutate(Jail = ifelse(groups == "Jail", 1, 0), 
+         CommServ = ifelse(groups == "CommServ", 1, 0),
+         linSlope = age0 + `age0:groupsJail`*Jail + `age0:groupsCommServ`*CommServ,
+         Intercept = `(Intercept)` + groupsJail*Jail + groupsCommServ*CommServ) %>%
+  select(pred, PROC_CID, Intercept, linSlope, groups, mod) # cubSlope,
+
+raneff_slopes.p <- raneff_slopes %>%
+  mutate(groups = as.character(groups)) %>%
+  full_join(sig) %>%
+  mutate(pred = factor(mapvalues(pred, traits$old, traits$breaks), levels = traits$breaks),
+         term = mapvalues(term, c("CommServ", "Jail", "None"), 
+                  c("COV", "Incarceration", "Neither"))) %>%
+  mutate_at(vars( term), ~str_replace_all(., "COV", "CommServ"))
+
+
+slopes <- nested.mods %>% 
+  filter(mod == "linear") %>%
+  select(pred:weighted, hypoth) %>% 
+  unnest(hypoth) %>%
+  separate(term, c("group", "term"), sep = "_") %>%
+  filter(grepl("Slope",term) & weighted == "weighted")
+
+# left off here color gray
+slopes.p <- sig %>% 
+  mutate(term = mapvalues(term, c("CommServ", "Jail", "None"), c("CommServ", "Incarceration", "Neither"))) %>%
+  rename(group = term) %>%
+  full_join(slopes) %>%
+  mutate(pred = factor(mapvalues(pred, traits$old, traits$breaks), levels = traits$breaks)) %>%
+  # mutate_at(vars(group, term), ~str_replace_all(., "Comm Serv", "Community Service")) %>%
+  rename(b = Estimate)
+
+slopes_fun <- function(Pred){
+  slopes.p <- slopes.p %>% filter(pred == Pred)
+  raneff_slopes.p <- raneff_slopes.p %>% filter(pred == Pred) %>% rename(group = term)
+  width <- ifelse(Pred %in% c("Depression", "Self\nEsteem"), 4, 6)
+  p <- slopes.p %>% ggplot(aes(x = group, y = b)) +
+    # scale_fill_manual(values = c("springgreen3", "blue", "darkorchid", "orange")) +
+    # scale_color_manual(values = c( "springgreen3", "blue", "darkorchid","orange")) +
+    # scale_color_manual(values = c("orange", "darkorchid", "blue", "springgreen3")) +
+    scale_y_continuous(limits = c(-.5, .5), breaks = seq(-.5, .5, length.out = 5)) +
+    geom_violin(data = raneff_slopes.p %>% filter(sig == "ns"), aes(y = linSlope),
+                fill = "gray", color = NA, alpha = .2) +
+    geom_errorbar(aes(ymin = lwr, ymax = upr), width = .1) +
+    geom_hline(aes(yintercept = 0), linetype = "dashed") +
+    geom_point(data = slopes.p %>% filter(sig == "ns"), color = "gray40", size = 2, shape = 15) +
+    geom_label(data = slopes.p %>% filter(sig == "ns"), 
+               aes(y = -.3, label = round(b,2)), fill = "gray", size = 4, color = "white") +
+    # geom_label(data = slopes.p %>% filter(sig == "sig"), 
+    #            aes(fill = pred, y = .3, label = d), size = 4, color = "white") +
+    labs(x = NULL, y = "Fixed Effect Slope Estimate") +
+    facet_grid(~pred, scales = "free_x") +
+    theme_classic() +
+    theme(axis.text = element_text(face = "bold", size = rel(1.2), color = "black"),
+          axis.text.x = element_text(angle = 45, hjust = 1),
+          axis.title = element_text(face = "bold", size = rel(1.2)),
+          strip.text = element_text(face = "bold", size = rel(1.2)),
+          legend.position = "none")
+  if(any(slopes.p$sig  == "sig")){
+  p <- p + 
+    geom_violin(data = raneff_slopes.p %>% filter(sig == "sig"), aes(y = linSlope),
+                fill = "blue", color = NA, alpha = .2) +
+    geom_point(data = slopes.p %>% filter(sig == "sig"), color = "blue", size = 2, shape = 15) +
+    geom_label(data = slopes.p %>% filter(sig == "sig"), 
+               aes(y = -.3, label = round(b,2)), fill = "blue", size = 4, color = "white") 
+  }
+  ggsave(sprintf("%s/results/plots/%s_forest.png", data_path, Pred), width = width, height = 4)
+  p
+}
+
+lapply(traits$breaks, slopes_fun)
+```
+
+### Trajectories   
+
+#### Linear  
+For example, the simple slopes for the *fixed effects* linear model can be defined as follows (Note the absence of the random terms in the simple slopes).
+
+\begin{itemize}
+\item $Jail = \gamma_{00} + U_{0j} + \gamma_{10}*age0$
+\item $None = \gamma_{00} + \gamma_{01} + U_{0j} + (\gamma_{10} + \gamma_{11})*age0$
+\item $CommServ = \gamma_{00} + \gamma_{02} + U_{0j} + (\gamma_{20} + \gamma_{12})*age0$
+\end{itemize}
+
+
+We extract each of the coefficients from the pooled models and multiply them by the expanded model frame (all combinations of plausible levels of groups and age).  
+
+```{r}
+load(sprintf("%s/results/psw_small.RData", data_path))
+
+fe <- 
+  nested.mods %>% 
+  select(pred:weighted, pool) %>%
+  unnest(pool) %>%
+  filter(type == "fixeff" & weighted == "weighted" & mod == "linear")  %>%
+  #select(mod, pred, term, Estimate) %>%
+  mutate(term = gsub("\\(", "", term),
+         term = gsub("\\)", "", term),term = gsub("\\^", "", term),
+         term = str_replace(term, "groups", ""),
+         term = str_replace(term, "CommServ:age02", "age02:CommServ"),
+         term = str_replace(term, "Jail:age02", "age02:Jail")) %>%
+  arrange(pred, term) %>%
+  select(pred, term, Estimate) %>%
+  spread(key = term, value = Estimate) %>%
+  select(pred, Intercept, order(colnames(.))) %>%
+  mutate_all(funs(ifelse(is.na(.), 0, .))) 
+
+means <- nested.psw %>% filter(match_set == "socialization") %>% 
+  unnest(imp.data.long) %>%
+  gather(key = pred, value = value, CESD:Impls) %>%
+  group_by(pred) %>%
+  summarize(t.T1_value = mean(value, na.rm = T)) %>%
+  ungroup()
+
+
+test <- crossing(
+  pred = unique(fe$pred), 
+  mod = c("linear")
+  ) %>%
+  full_join(
+  crossing(pred = unique(fe$pred),
+            t.Intercept = 1, t.age0 = seq(-4,10,.05)/5, t.groupsJail = c(0,1),
+            t.groupsCommServ = c(0,1)) %>%
+  filter(!(t.groupsJail == 1 & t.groupsCommServ == 1))) %>%
+  mutate(# tw way interactions bw group & age0 and age0^2
+         `t.age0:groupsJail` = t.groupsJail*t.age0,
+         `t.age0:groupsCommServ` = t.groupsCommServ*t.age0)  %>%
+  full_join(means) %>%
+  select(pred, t.Intercept, order(colnames(.)), -mod)
+
+fe_slopes <- fe %>% full_join(test)
+
+pv_fun <- function(df, vcov_mat){
+  vcov_mat <- vcov_mat[sort(rownames(vcov_mat)),sort(colnames(vcov_mat))]
+  df <- as.matrix(data.frame(unclass(df %>% select(contains("t.")))))
+  df <- df[,sort(colnames(df))]
+  diag(df %*% vcov_mat %*% t(df))
+}
+
+comb_fun <- function(df, pv){
+  df$predvar <- pv
+  return(df)
+}
+
+te <- fe_slopes %>%
+  group_by(pred) %>%
+  nest() %>%
+  full_join(
+    nested.mods %>% 
+      filter(weighted == "weighted" & mod == "linear")  %>% 
+      select(pred, pooled_vcov)
+    ) %>%
+  mutate(predvar = map2(data, pooled_vcov, pv_fun),
+         data = map2(data, predvar, comb_fun)) %>%
+  select(pred, data) %>%
+  unnest(data)
+
+fe_slopes$y <- rowSums((fe_slopes %>% select(Intercept:Jail)) * (fe_slopes %>% select(t.Intercept:t.groupsJail))) 
+
+fe_sigma <- nested.mods %>% 
+  filter(weighted == "weighted" & mod == "linear")  %>% 
+  select(pred:weighted, pool) %>%
+  unnest(pool) %>% 
+  filter(term == "\\hat{\\sigma^2}") %>% 
+  select(pred, Estimate) %>%
+  mutate(pred = mapvalues(pred, traits$old, traits$new))
+
+fe_slopes <- fe_slopes %>%
+  full_join(te) %>%
+  full_join(fe_sigma) %>% 
+  mutate(groups = ifelse(t.groupsJail == 1, "Incarceration", 
+                  ifelse(t.groupsCommServ == 1, "Community Service", "Neither")),
+          pred = mapvalues(pred, traits$old, traits$new)) %>% 
+  select(pred, t.age0, groups, y, predvar, Estimate) 
+
+fe_slopes$SE <- sqrt(fe_slopes$predvar) 
+fe_slopes$SE2 <- sqrt(fe_slopes$predvar+fe_slopes$Estimate)
+
+fe_slopes <- unique(fe_slopes %>% select(pred, t.age0, groups, y, SE))
+range_act <- fe_slopes %>%
+  group_by(pred) %>%
+  summarize(y = list(
+  range(range(y), range(t.age0)))) %>%
+  unnest(y) %>%
+  mutate(t.age0 = y)
+
+range_act <- fe_slopes %>%
+  group_by(pred) %>%
+  summarize(min = min(y, na.rm=T) - .5, max = max(y, na.rm=T) + .5) %>%
+  ungroup() %>%
+  gather(key = est, value = y, min, max) %>%
+  mutate(t.age0 = y) %>% select(-est) %>% 
+  mutate(pred = mapvalues(pred, traits$old, traits$new),
+         pred = factor(pred, levels = traits$new))
+
+fe_slopes  %>%
+  filter(!is.na(groups)) %>%
+  group_by(pred) %>% mutate(z = as.numeric(scale(y))) %>%
+  ungroup() %>%
+  mutate(pred = factor(pred, levels = traits$new),
+         groups = factor(groups, levels = c("Neither", "Incarceration", "Community Service"))) %>%
+  ggplot(aes(x = t.age0*5+(14), y = y)) +
+    scale_x_continuous(limits = c(10,24), breaks = seq(10,24,4)) +
+  scale_y_continuous(limits = c(0,2.5), breaks = seq(0,2,1)) +
+    #geom_smooth(se = F, size = 1.2, span = .1) +
+    geom_ribbon(aes(ymin=y-2*SE,ymax=y+2*SE, group = groups),alpha=0.15,fill="blue") +
+    geom_line(aes(color = groups, group = groups),size = 1.2) + 
+    geom_blank(data = range_act) +
+    # geom_point(data = pred_dat , color = "black", aes(x = age, y = value)) +
+    # geom_line(data = pred_dat %>% filter(item == Item), size = 1.2,
+    #           aes(x = age, y = value, color = groups2, group = groups2), linetype = "dashed") +
+    #geom_hline(aes(yintercept = 0), linetype = "dashed") +
+    labs(x = "Age", y = "Predicted Rating", color = "Group") +
+    facet_wrap( ~ pred, nrow = 2, scales = "free") +
+    theme_classic() + 
+    theme(axis.text = element_text(face = "bold", size = rel(1.2)),
+          axis.title = element_text(face = "bold", size = rel(1.2)),
+          strip.text = element_text(face = "bold", size = rel(1.2)),
+          legend.text = element_text(face = "bold"),
+          legend.title = element_text(face = "bold", size = rel(1.2)),
+          legend.position = "bottom",
+          plot.title = element_text(face = "bold", size = rel(1.2), hjust = .5))
+ggsave(sprintf("%s/results/plots/ml_change.png", data_path), width = 8, height = 6)
+```
+
+#### Non-Linear
+```{r}
+plot_data_fun <- function(d, gr){
+  terms <- d %>% 
+    mutate(group = if_else(group != "Neither", "Contact", group)) %>%
+    select(-lwr, -upr, -mod) %>%
+    pivot_wider(names_from = c("group", "term")
+                , values_from = "Estimate")
+  
+  tibble(
+    group = "Neither"
+    , wave0 = seq(-10, 10, .5)
+    , y = terms$Neither_Int + terms$Neither_Slope*wave0
+    ) %>% full_join(
+      tibble(
+        group = "Contact"
+        , wave0 = seq(-10, -.001, .001)
+        , y = terms$Contact_PreInt + terms$Contact_PreSlope*wave0
+      )
+    ) %>% full_join(
+      tibble(
+        group = "Contact"
+        , wave0 = seq(.001, 10, .001)
+        , y = terms$Contact_PostInt + terms$Contact_PostSlope*wave0
+      )
+    ) %>% full_join(tibble(wave0 = 0, group = "Contact", y = NA))
+}
+
+plot_save_fun <- function(d, weight){
+  p <- d  %>%
+    ggplot(aes(x = wave0
+               , y = y
+               , group = group
+               , color = group
+               , linetype = group)) + 
+      scale_color_manual(values = c("blue", "black")) +
+      scale_x_continuous(limits = c(-10.2, 10.2), breaks = seq(-10, 10, 5)) + 
+      # scale_y_continuous(limits = c(.5, 3.5), breaks = seq(1, 3, 1)) + 
+      geom_line(size = .9) + 
+      labs(x = "Wave Centered at Average Age Incarceration"
+           , y = "Estimated Level"
+           , color = NULL
+           , linetype = NULL) + 
+      facet_grid(groups ~ pred, scales = "free_y") +
+      theme_classic() +
+      theme(panel.background = element_rect(color = "black", size = .8)
+            , strip.background = element_blank()
+            , strip.text = element_text(face = "bold", size = rel(1.1))
+            , legend.position = "bottom"
+            , legend.text = element_text(face = "bold", size = rel(.9))
+            , axis.line = element_line(size = .1)
+            , axis.text = element_text(face = "bold", size = rel(1), color = "black")
+            , axis.title = element_text(face = "bold", size = rel(1.1)))
+  ggsave(p
+       , file = sprintf("%s/results/plots/spline/%s_trajectories_none.png", data_path, weight)
+       , width = 10
+       , height = 7)
+  return(p)
+}
+
+nl2g_plot <- nested.mods %>%
+  filter(mod != "linear") %>%
+  select(pred:weighted, hypoth) %>%
+  unnest(hypoth) %>%
+  filter(!grepl("Diff", term)) %>%
+  mutate(term = str_replace_all(term, "Either", groups)) %>%
+  separate(term, c("group", "term"), sep = "_")  %>%
+    mutate(pred = factor(pred, traits$old, traits$breaks),
+           groups = factor(groups, c("Jail", "CommServ"), 
+                              c("Incarceration", "Community\nService"))) %>%
+  group_by(pred, groups, weighted) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(data = map2(data, groups, plot_data_fun)) %>%
+  unnest(data) %>%
+  group_by(weighted) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(plot = map2(data, weighted, plot_save_fun))
+
+nl2g_plot$plot[[2]]
+```
+
+
+### Random Effects  
+
+```{r soc REs, eval = T, fig.height=9, fig.width=6.5}
+grp.randeff <- nested.mods %>% 
+  filter(weighted == "weighted" & mod == "linear") %>%
+  select(pred:pooled_re, -groups) %>%
+  unnest(pooled_re) %>% 
+  left_join(group_wide %>% select(PROC_CID, groups)) %>% 
+  gather(key = term, value = value, `(Intercept)`:`age0:groupsCommServ`) %>%
+  group_by(groups, term, pred) %>%
+  summarise(var = var(value, na.rm = T)) %>%
+  ungroup() %>%
+  spread(key = groups, value = var) %>%
+  mutate_at(vars(Jail:CommServ), funs(round(.,4))) %>%
+  filter(term %in% c("(Intercept)", "age0"))
+
+raneff_pred <- raneff_slopes %>% 
+  full_join(crossing(PROC_CID = unique(raneff_slopes$PROC_CID), age0 = seq(-4,10,1)/5)) %>%
+  mutate(y = Intercept + linSlope*age0,
+         groups = mapvalues(groups, unique(groups), c("Community Service", "Incarceration", "Neither")),
+         pred = mapvalues(pred, traits$old, traits$new))
+
+n_subs <- sample(unique((group_wide %>% filter(groups == "None"))$PROC_CID),50)
+j_subs <- sample(unique((group_wide %>% filter(groups == "Jail"))$PROC_CID),50)
+c_subs <- sample(unique((group_wide %>% filter(groups == "CommServ"))$PROC_CID),50)
+
+(ind_plot <- raneff_pred %>%
+  #filter(pred %in% c("SensSeek", "Impls")) %>%
+  filter(PROC_CID %in% c(n_subs, j_subs, c_subs)) %>%
+  ggplot(aes(x = age0*5+(14), y = y, group = PROC_CID, color = groups)) + 
+    scale_x_continuous(limits = c(10,24), breaks = seq(10,24,2)) +
+    # scale_color_manual(values = RColorBrewer::brewer.pal(9, "Blues")[c(1,5,9)])+
+    geom_line(size = .3, alpha = .25) + 
+    geom_line(data = fe_slopes, aes(x = t.age0*5+14, color = groups, group = groups),size = 1.2) + 
+    labs(x = "Age", y = "Predicted Rating", color = "Group") +
+    facet_wrap( ~ pred, scales = "free") +
+    theme_classic() + 
+    theme(axis.text = element_text(face = "bold", size = rel(1.2)),
+          axis.title = element_text(face = "bold", size = rel(1.2)),
+          strip.text = element_text(face = "bold", size = rel(1.2)),
+          legend.text = element_text(face = "bold"),
+          legend.title = element_text(face = "bold", size = rel(1.2)),
+          legend.position = "bottom"))
+ggsave(sprintf("%s/results/plots/raneff_change.png", data_path), width = 6, height = 5)
+rm(nested.mods)
+```
+
+# Moderators  
+
+```{r mod tab size, eval = F}
+small_size <- c("DemFathNHH", "HHDadDead", "HHMomDead", "ParEmoSupp", "HlthCndLim")
+moder_long %>% full_join(group_wide %>% select(PROC_CID, groups)) %>%
+  filter(PROC_CID %in% unique(match_wide$PROC_CID)) %>%
+  filter(!is.na(modvalue) & !is.na(groups) & groups == "Jail") %>%
+  group_by(moditem, modvalue, groups) %>%
+  summarize(n = n()) %>% 
+  ungroup() %>% 
+  filter(!moditem %in% small_size) %>%
+  unite(groups, groups, modvalue, sep = "") %>% 
+  pivot_wider(names_from = groups, values_from  = n) 
+```
+ 
+## Functions  
+### Model Functions  
+```{r}
+mod_fun2 <- function(dv, Moder, Form, groups, psw.weights){
+  print(paste(dv, Moder, Form, sep = " "))
+  mods <- lapply(1:10, function(x){
+    lmer_fun2(X = x, DV = dv, moder = Moder, form = Form, Groups = groups, PSW.Weights = psw.weights)})
+  pred.fx <- fx_pred_fun(mods, Form)
+  save(pred.fx, file = sprintf("%s/results/%s/pred/%s_%s_%s_%s.RData", 
+                            data_path, Form, psw.weights, dv, groups, Moder))
+  # p <- pool_fun(mods)
+  # save(p, file = sprintf("%s/results/%s/pooled/%s_%s_%s_%s_%s.RData",
+                         # data_path, Form, psw.weights, dv, groups, Moder))
+  # p_re <- pooled_re_fun(mods)
+  # save(p_re, file = sprintf("%s/results/%s/pooled_re/%s_%s_%s_%s.RData",
+  #                        data_path, Form, psw.weights, dv, groups, Moder))
+  rm(list = c("mods", "p", "p_re", "pred"))
+  gc()
+}
+
+# short function for running models
+lmer_fun2 <- function(X, DV, moder, form, Groups, PSW.Weights){
+  print(paste(DV, moder, form, sep = " "))
+  load(sprintf("%s/data/model_data/%s/%s_chain.%s_%s.RData", data_path, form, DV, X, Groups))
+  if(PSW.Weights == "weighted"){pw <- d$psw.weights}
+  else{pw <- rep(1, nrow(d))}
+  md <- moder_wide %>% 
+        select(PROC_CID, one_of(moder)) %>%
+        setNames(c("PROC_CID", "modvalue"))
+  if(class(md$modvalue) != "factor"){md <- md %>% mutate(modvalue = as.numeric(scale(modvalue, scale = F)))}
+  mage <- d %>% select(PROC_CID, cont_age, cont_year) %>% distinct() %>% summarize_at(vars(-PROC_CID), mean, na.rm = T)
+  d <- d %>% 
+    left_join(md) %>%
+    group_by(PROC_CID) %>% 
+    mutate(age_c = age_baseline - mage$cont_age,
+           wave0 = year - mage$cont_year) %>% 
+    ungroup() %>% 
+    mutate(groups = fct_relevel(groups, "None")) 
+  cl <- lmerControl(check.conv.grad     = .makeCC("ignore", tol = 2e-2, relTol = NULL),
+    check.conv.singular = .makeCC(action = "ignore",  tol = 1e-2),
+    check.conv.hess     = .makeCC(action = "ignore", tol = 1e-3),
+    check.scaleX = c("ignore"))
+   y <- if(form == "linear"){
+    lmer(value ~ T1_value + age0*groups*modvalue + (age0 | PROC_CID)
+         , data = d, weights = pw, control = cl)
+  } else{
+    lmer(value ~ wave0 + age_c + tv_group + groups + modvalue + wave0:groups +
+           age_c:groups + wave0:tv_group + wave0:modvalue + tv_group:modvalue + 
+           modvalue:groups + modvalue:wave0:groups + (wave0 | PROC_CID)
+         , data = d, weights = pw, control = cl)
+  }
+  save(y, file = sprintf("%s/results/%s/models/%s_%s_chain.%s_%s_%s.RData", data_path, form, PSW.Weights, DV, X, Groups, moder))
+  rm(d)
+  gc()
+  return(y)
+}
+```
+
+### Prediction Function  
+```{r}
+fx_pred_fun <- function(fits, m){
+  if(m == "linear"){
+    x <- lapply(fits, function(x) {
+      cl <- class(x@frame$modvalue)
+    
+      if(cl %in% c("numeric", "integer", "matrix")){
+      msd <- x@frame %>% 
+        select(modvalue) %>% 
+        as_tibble() %>%
+        summarize_all(lst(mean, sd))
+      
+      pred.fx <- crossing(
+        age0 = seq(-8,20,.2)/5
+        , groups = c("None", "CommServ", "Jail")
+        , modvalue = with(msd, c(mean-sd, mean,mean+sd))
+        , T1_value = mean(x@frame$T1_value)
+        ) 
+      } else {
+        pred.fx <- crossing(
+          age0 = seq(-8,20,.2)/5
+          , groups = c("None", "CommServ", "Jail")
+          , modvalue = factor(levels(x@frame$modvalue))
+          , T1_value = mean(x@frame$T1_value)
+        ) 
+      }
+        
+      pred.fx <- pred.fx %>%
+        mutate(pred = predict(x
+               , newdata = pred.fx
+               ,  re.form = NA))
+      
+      if(cl %in% c("numeric", "integer", "matrix")){
+          pred.fx <- pred.fx %>% mutate(modvalue = mapvalues(modvalue, unique(sort(modvalue)), c("-1 SD", "M", "+1 SD")))
+      }
+          return(pred.fx)
+      })
+    res <- tibble(pred = x) %>% 
+      unnest(pred) %>% 
+      group_by(age0, groups, modvalue, T1_value) %>% 
+      summarise_all(mean, na.rm = T) %>%
+      ungroup()
+  } else {
+    x <- lapply(fits, function(x) {
+      cl <- class(x@frame$modvalue)
+    
+      if(cl %in% c("numeric", "integer", "matrix")){
+      msd <- x@frame %>% 
+        select(modvalue) %>% 
+        as_tibble() %>%
+        summarize_all(lst(mean, sd))
+      
+      pred.fx <- crossing(
+        wave0 = seq(-10, 10, .001)
+        , groups = factor(levels(x@frame$groups))
+        , modvalue = with(msd, c(mean-sd, mean,mean+sd))
+        , age_c = 0
+        , tv_group = c(0,1)
+        ) %>%
+        filter((groups == "None" & tv_group == 0) |
+               (groups != "None" & tv_group == 0 & wave0 < 0) | 
+               (groups != "None" & tv_group == 1 & wave0 > 0)) 
+      } else {
+        pred.fx <- crossing(
+          wave0 = seq(-10, 10, .001)
+          , groups = factor(levels(x@frame$groups))
+          , modvalue = factor(levels(x@frame$modvalue))
+          , age_c = 0
+          , tv_group = c(0,1)
+        )  %>%
+        filter((groups == "None" & tv_group == 0) |
+               (groups != "None" & tv_group == 0 & wave0 < 0) | 
+               (groups != "None" & tv_group == 1 & wave0 > 0)) 
+      }
+        
+      pred.fx <- pred.fx %>%
+        mutate(pred = predict(x
+               , newdata = pred.fx
+               ,  re.form = NA)) %>%
+        mutate(pred = ifelse(wave0 == 0, NA, pred))
+      
+      if(cl %in% c("numeric", "integer", "matrix")){
+          pred.fx <- pred.fx %>% mutate(modvalue = mapvalues(modvalue, unique(sort(modvalue)), c("-1 SD", "M", "+1 SD")))
+      }
+          return(pred.fx)
+      })
+    res <- tibble(pred = x) %>% 
+      unnest(pred) %>% 
+      group_by(wave0, groups, modvalue, age_c, tv_group) %>% 
+      summarise_all(mean, na.rm = T) %>%
+      ungroup()
+  }
+  return(res)
+}
+
+loadRData <- function(path, obj){
+#loads an RData file, and returns it
+    load(path)
+    get(ls()[grepl(obj, ls())])
+}
+
+grab_fun <- function(dv, mod, groups, weight, moder){
+  print(paste(dv, mod, groups, weight, moder))
+  fits <- (tibble(chain = 1:10) %>%
+    mutate(path = sprintf("%s/results/%s/models/%s_%s_chain.%s_%s_%s.RData", data_path, mod, weight, dv, chain, groups, moder),
+           mods = map(path, ~loadRData(., "y"))))$mods
+  hypoth <- moder_hypoth_fun(fits, mod)
+  save(hypoth, file = sprintf("%s/results/%s/hypoth/%s_%s_%s_%s.RData", 
+                            data_path, mod, weight, dv, groups, moder))
+  # pred.fx <- fx_pred_fun(fits, mod)
+  # save(pred.fx, file = sprintf("%s/results/%s/pred/%s_%s_%s_%s.RData", 
+  #                           data_path, mod, weight, dv, groups, moder))
+}
+
+
+crossing(
+  pred = unique(traits$old),
+  mod = c("linear", "spline"),
+  moder = unique(moder_long$moditem),
+  groups = c("Jail", "CommServ", "threegroup"),
+  weighted = c("weighted", "unweighted")
+  ) %>%
+  filter(!(mod == "linear" & groups %in% c("Jail", "CommServ")) & 
+         !(mod == "spline" & groups == "threegroup")) %>%
+  filter(!(moder %in% small_size)) %>%
+  filter(mod != "spline") %>%
+  mutate(pmap(list(pred, mod, groups, weighted, moder), grab_fun))
+```
+
+### Hypothesis Function  
+```{r}
+moder_hypoth_fun <- function(fits, m){
+  y <- lapply(fits, function(x){
+    cl <- class(x@frame$modvalue)
+    if(m == "linear"){
+      if(cl == "factor"){
+        K <- c("age0 = 0", # moder level 0, no contact
+               "age0 + age0:groupsJail = 0", # moder level 0, jail
+               "age0 + age0:groupsCommServ = 0", # moder level 0, commserv
+               "age0 + age0:modvalue1 = 0", # moder level 1, no contact
+               "age0 + age0:modvalue1 + age0:groupsJail:modvalue1 = 0", # moder level 1, jail
+               "age0 + age0:modvalue1 + age0:groupsCommServ:modvalue1 = 0") # moder level 1, jail
+        grnm <- c("None_modvalue0", "Jail_modvalue0", "CommServ_modvalue0", "None_modvalue1",
+                  "Jail_modvalue1", "CommServ_modvalue1")
+        if(length(levels(x@frame$modvalue)) == 3){
+          K <- c(K, 
+                 "age0 + age0:modvalue2 = 0", # moder level 1, no contact
+                 "age0 + age0:modvalue2 + age0:groupsJail:modvalue2 = 0", # moder level 1, jail
+                 "age0 + age0:modvalue2 + age0:groupsCommServ:modvalue2 = 0") # moder level 1, jail
+          grnm <- c(grnm, "None_modvalue2", "Jail_modvalue2", "CommServ_modvalue2")
+        }
+      } else {
+        msd <- x@frame %>% 
+          select(modvalue) %>% 
+          as_tibble() %>%
+          summarize_all(lst(mean, sd)) %>%
+          mutate(lower = mean - sd, upper = mean + sd)
+        K <- rbind("None_modvalue_M" =     c(0,0,1,0,0,0,0,0,msd$mean,0,0,0,0),
+                   "Jail_modvalue_M" =     c(0,0,1,0,0,1,0,0,msd$mean,0,0,msd$mean,0),
+                   "CommServ_modvalue_M" = c(0,0,1,0,0,0,1,0,msd$mean,0,0,0,msd$mean),
+                   "None_modvalue_lower" =     c(0,0,1,0,0,0,0,0,msd$lower,0,0,0,0),
+                   "Jail_modvalue_lower" =     c(0,0,1,0,0,1,0,0,msd$lower,0,0,msd$lower,0),
+                   "CommServ_modvalue_lower" = c(0,0,1,0,0,0,1,0,msd$lower,0,0,0,msd$lower),
+                   "None_modvalue_upper" =     c(0,0,1,0,0,0,0,0,msd$upper,0,0,0,0),
+                   "Jail_modvalue_upper" =     c(0,0,1,0,0,1,0,0,msd$upper,0,0,msd$upper,0),
+                   "CommServ_modvalue_upper" = c(0,0,1,0,0,0,1,0,msd$upper,0,0,0,msd$upper)
+                   )
+        grnm <- rownames(K)
+      }
+  } else {
+    gr <- names(fixef(x))[grepl('groups', names(fixef(x)))][1]
+    if(cl == "factor"){
+      K <- if(length(levels(x@frame$modvalue)) == 2){
+        rbind("Pre_modvalue0" =  c(1,0,0, 0,1,0, 0,0,0, 0,0,0, 0),
+              "Post_modvalue0" = c(1,0,0, 1,1,0, 0,0,0, 0,0,0, 0),
+              "Pre_modvalue1" =  c(1,0,0, 0,1,1, 0,0,0, 0,0,1, 0),
+              "Post_modvalue1" = c(1,0,0, 1,1,1, 0,0,0, 0,1,1, 0))
+        } else {
+        rbind("Pre_modvalue0" =  c(1,0,0, 0,1,0, 0,0,0, 0,0,0, 0,0,0, 0,0,0),
+              "Post_modvalue0" = c(1,0,0, 1,1,0, 0,0,0, 0,0,0, 0,0,0, 0,0,0),
+              "Pre_modvalue1" =  c(1,0,0, 0,1,1, 0,0,0, 0,0,0, 0,0,1, 0,0,0),
+              "Post_modvalue1" = c(1,0,0, 1,1,1, 0,0,0, 0,0,0, 1,0,1, 0,0,0),
+              "Pre_modvalue2" =  c(1,0,0, 0,1,0, 1,0,0, 0,0,0, 0,0,0, 1,0,0),
+              "Post_modvalue2" = c(1,0,0, 1,1,0, 1,0,0, 0,0,0, 0,1,0, 1,0,0))
+        }
+      grnm <- rownames(K)
+      } else {
+        msd <- x@frame %>% 
+          select(modvalue) %>% 
+          as_tibble() %>%
+          summarize_all(lst(mean, sd)) %>%
+          mutate(lower = mean - sd, upper = mean + sd)
+        K <- rbind("Pre_modvalue_M" =      c(1,0,0, 0,1,msd$mean,  0,0,0, 0,0,msd$mean,          0),
+                   "Post_modvalue_M" =     c(1,0,0, 1,1,msd$mean,  0,0,0, 0,msd$mean,msd$mean,   0),
+                   "Pre_modvalue_lower" =  c(1,0,0, 0,1,msd$lower, 0,0,0, 0,0,msd$lower,         0),
+                   "Post_modvalue_lower" = c(1,0,0, 1,1,msd$lower, 0,0,0, 0,msd$lower,msd$lower, 0),
+                   "Pre_modvalue_upper" =  c(1,0,0, 0,1,msd$upper, 0,0,0, 0,0,msd$upper,         0),
+                   "Post_modvalue_upper" = c(1,0,0, 1,1,msd$upper, 0,0,0, 0,msd$upper,msd$upper, 0)
+        )
+        grnm <- rownames(K)
+        }
+    }
+    h <- confint(multcomp::glht(x, linfct = K))$confint %>%
+            data.frame() %>%
+            mutate(term = grnm)
+    })
+  res <- tibble(hypoth = y) %>% 
+      unnest(hypoth) %>% 
+      group_by(term) %>% 
+      summarise_all(mean, na.rm = T) %>%
+      ungroup()
+  return(res)
+}
+```
+
+
+## Run and Pool Models  
+
+```{r moder mods, eval = F}
+nested.moder.mods <- crossing(
+  pred = unique(traits$old),
+  mod = c("linear", "spline"),
+  moder = unique(moder_long$moditem),
+  groups = c("Jail", "CommServ", "threegroup"),
+  weighted = c("weighted", "unweighted")
+  ) %>%
+  filter(!(mod == "linear" & groups %in% c("Jail", "CommServ")) & 
+         !(mod == "spline" & groups == "threegroup")) %>%
+  filter(!(moder %in% small_size)) %>%
+  filter(moder %in% c("SclSat", "SclChal", "EduRemed")) %>%
+  # filter(weighted == "weighted" & 
+  #       ((pred %in% c("SensSeek", "Impls") & groups == "CommServ" & moder == "DemRace") | 
+  #        (pred == "CESD" & groups == "CommServ" & moder %in% c("DemRace", "SclChal", "SclSat", "ParDvrcd", "EduRemed", "DSSpank", "DemCSex")))) %>%
+  # select(pred, moder, mod, groups, weighted ) %>%
+  # write.table(., file = sprintf("%s/scripts/cluster/moder_args.txt", data_path), col.names = F, row.names = F)
+  mutate(models = pmap(list(pred, moder, mod, groups, weighted) , mod_fun2))
+gc()
+```
+
+
+```{r clean envir3, echo = F}
+all_env <- ls()
+all_env <- all_env[!(all_env %in% c("data_path", "pred_long", "group_wide"))]
+rm(list = all_env)
+```
+
+## Load Results  
+```{r moder results}
+# clear up ram
+loadRData <- function(fileName, form, type, obj){
+#loads an RData file, and returns it
+    path <- sprintf("%s/results/%s/%s/%s", data_path, form, type, fileName)
+    load(path)
+    get(ls()[grepl(obj, ls())])
+}
+
+nested.moder.mods <- tibble(mod = c("spline", "linear")) %>%
+  mutate(file = map(mod, ~list.files(sprintf("%s/results/%s/pooled", data_path,.)))) %>%
+  unnest(file) %>%
+  separate(file, c("weighted", "pred", "groups", "moder"), sep = "_", remove = F) %>%
+  mutate(moder = str_remove_all(moder, ".RData")) %>%
+  filter(moder != "none") %>%
+  mutate(pool = map2(file, mod, ~loadRData(.x, .y, "pooled", "p")),
+         pool_re = map2(file, mod, ~loadRData(.x, .y, "pooled_re", "p_re")),
+         pred.fx = map2(file, mod, ~loadRData(.x, .y, "pred", "pred.fx")),
+         hypoth = map2(file, mod, ~loadRData(.x, .y, "hypoth", "hypoth")))
+```
+
+
+## Table Results  
+
+```{r moder tabs, results='asis', eval = T}
+mod.tab <- nested.moder.mods %>% 
+  select(mod, weighted:pool) %>%
+  unnest(pool) %>% 
+  # get rid of the random effects for now
+  filter(type == "fixeff") # %>%
+  # mutate(CI = sprintf("[%.2f, %.2f]", Estimate - CI, Estimate + CI))
+
+results.tab <- mod.tab %>%
+  #### fixed effects ####
+  mutate(type = ifelse(grepl("modvalue", term) == T, "Moderator", type)) %>% 
+  # format the confidence intervals and estimate for LaTeX
+  mutate(CI = sprintf("[%.2f, %.2f]", CI.lower, CI.upper),
+         CI = ifelse(p < .05, sprintf("<strong>%s</strong>", CI), CI),
+         Estimate = round(Estimate, 2),
+         Estimate = ifelse(p < .05, sprintf("<strong>%s</strong>", Estimate), Estimate)) %>%
+  # get rid of t, p, and the empty group variable
+  select(-t, -p, -CI.lower, -CI.upper) %>%
+  rename(b = Estimate) %>%
+  # change b & CI to long so we can make the outcomes, rather than coefficients, wide
+  gather(key = est, value = value, b, CI)
+```
+
+### Linear Models  
+```{r}
+moders2 <- tribble(
+  ~new_Moder, ~Moder, ~old, ~new,
+  "Gender", "DemCSex", "0", "Male", 
+  "Gender", "DemCSex", "1", "Female",
+  "Race", "DemRace", "0", "White",
+  "Race", "DemRace", "1", "Black",
+  "Race", "DemRace", "2", "Other",
+  "Corporal Punishment", "DSSpank", "0", "No",
+  "Corporal Punishment", "DSSpank", "1", "Yes",
+  "Remedial Education", "EduRemed", "-1 SD", "-1 SD",
+  "Remedial Education", "EduRemed", "M", "M",
+  "Remedial Education", "EduRemed", "+1 SD", "+1 SD",
+  "Parent Died", "HHParDead", "0", "None",
+  "Parent Died", "HHParDead", "1", "One",
+  "Parent Died", "HHParDead", "2", "Two",
+  "Welfare", "MWelfare", "0", "No",
+  "Welfare", "MWelfare", "1", "Yes",
+  "Parental Divorce", "ParDvrcd", "0", "No",
+  "Parental Divorce", "ParDvrcd", "1", "Yes",
+  "School Challenging", "SclChal", "-1 SD", "-1 SD",
+  "School Challenging", "SclChal", "M", "M",
+  "School Challenging", "SclChal", "+1 SD", "+1 SD",
+  "School Satisfaction", "SclSat", "-1 SD", "-1 SD",
+  "School Satisfaction", "SclSat", "M", "M",
+  "School Satisfaction", "SclSat", "+1 SD", "+1 SD"
+) %>%
+  mutate(comb = paste0(Moder, old))
+
+moders3 <- tribble(
+  ~new_Moder, ~old, ~new,
+  "Gender", "DemCSex1", "Male v Female", 
+  "Race", "DemRace1", "White v Black",
+  "Race", "DemRace2", "White v Other",
+  "Corporal Punishment", "DSSpank1", "No v Yes",
+  "Parent Died", "HHParDead1", "None v One",
+  "Parent Died", "HHParDead2", "None v Two",
+  "Welfare", "MWelfare1", "No v Yes",
+  "Parental Divorce", "ParDvrcd1", "No v Yes",
+  "School Satisfaction", "SclSat", "Continuous", 
+  "School Challenging", "SclChal", "Continuous", 
+  "Remedial Education", "EduRemed", "Years"
+) 
+
+lin_moder_tab_fun <- function(d, weight){
+  options(papaja.na_string = "")
+  tab <- d %>%
+    mutate(groups = factor(groups, levels = c("Jail", "CommServ")),
+           moder = factor(moder, levels = unique(moders2$new_Moder)),
+           term = factor(term, levels = unique(d$term))) %>%
+    arrange(groups, moder, term) %>%
+    select(-groups) %>%
+    kable(., "html", booktabs = T, escape = F,
+          col.names = c("", "Group", rep("b [CI]", times = 4)),
+          caption = sprintf("<strong>Table X</strong><br><em>Moderators of Linear Slopes between Groups for %s Models", weight),
+          align = c("l", "l", rep("c", 4))) %>%
+    kable_styling(full_width = F) %>%
+    add_header_above(c(" " = 2, "Sensation Seeking" = 1, "Impulsivity" = 1, "Depressive Symptoms" = 1,  "Self Esteem" = 1)) %>%
+    kableExtra::group_rows("None v Incarceration", 1, 11) %>%
+    kableExtra::group_rows("None v Community Service", 12, 22) %>%
+    collapse_rows(1, valign = "top")
+  save_kable(tab, file = sprintf("%s/results/tables/linear/%s_moder_slopes_tab.html", data_path, weight))
+  return(tab)
+}
+
+lin_moder_tab <- results.tab  %>%
+  filter((grepl("modvalue", term) & grepl("^age0:gr", term)) & mod == "linear") %>%
+  separate(term, into = c("t1", "t2", "t3"), sep = ":") %>%
+  mutate(t3 = str_replace_all(t3, "modvalue", moder),
+         t2 = str_remove_all(t2, "groups")) %>%
+  arrange(pred, t2, est) %>%
+  select(-d) %>%
+  pivot_wider(names_from = "est", values_from = "value") %>%
+  mutate(moder = mapvalues(moder, moders2$Moder, moders2$new_Moder),
+         t3 = mapvalues(t3, moders3$old, moders3$new),
+         estimate = sprintf("%s<br>%s", b, CI)) %>%
+  select(-b, -CI) %>%
+  pivot_wider(names_from = "pred", values_from = "estimate") %>%
+  select(groups = t2, weighted, moder, term = t3, contains(traits$old))
+
+lin_moder_kable <- lin_moder_tab %>%
+  group_by(weighted) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, weighted, lin_moder_tab_fun))
+```
+
+#### Weighted  
+```{r}
+lin_moder_kable$tab[[2]]
+```
+
+```{r}
+nested.moder.mods %>%
+  select(mod, weighted:moder, pool) %>%
+  unnest(pool) %>%
+  filter(weighted == "weighted" & mod == "linear") %>%
+  filter(grepl("age0:gr", term) & grepl(":modval", term)) %>%
+  mutate(est = sprintf("b = %.2f 95%% CI [%.2f, %.2f]", Estimate, CI.lower, CI.upper),
+         sig = ifelse(sign(CI.lower) == sign(CI.upper), "sig", "ns")) %>%
+  arrange(moder, term, pred) %>%
+  select(-mod, -weighted, -groups, -type, -(Estimate:d)) %>%
+  filter(moder == "MWelfare")
+
+nested.moder.mods %>%
+  filter(mod == "linear" & weighted == "weighted") %>%
+  select(mod, weighted:moder, hypoth) %>%
+  unnest(hypoth) %>% 
+  separate(term, c("term2", "term", "modval"), sep = "_") %>%
+  mutate(modval = ifelse(is.na(modval), str_remove_all(term, "[A-Z a-z]"), modval),
+         modval = mapvalues(modval, c("lower", "upper"), c("-1 SD", "+1 SD")),
+         modval = paste0(moder, modval),
+         modval = mapvalues(modval, moders2$comb, moders2$new)) %>%
+  mutate(Estimate = sprintf("b = %.2f; 95%% CI [%.2f, %.2f]", Estimate, lwr, upr)) %>%
+  select(pred, moder, term2, term, modval, Estimate) %>%
+  filter(moder == "MWelfare" & pred == "SensSeek")
+```
+
+#### Unweighted  
+```{r}
+lin_moder_kable$tab[[1]]
+```
+
+#### Simple Effects  
+```{r}
+lin_moder_sf_tab <- function(d, weighted){
+  spanh <- c(2, rep(1,12))
+  names(spanh) <- c(" ", rep(c("Neither", "Incarceration", "Community\nService"), times = 4))
+  d %>% 
+    kable(.
+          , "html"
+          , escape = F
+          , col.names = c("Moderator", "", rep("b [CI]", 12))
+          , align = c("r", "r", rep("c", 12))) %>%
+    kable_styling(full_width = F) %>%
+    add_header_above(spanh) %>%
+    add_header_above(c(" " = 2, "Sensation Seeking" = 3, "Impulsivity" = 3, 
+                       "Depressive Symptoms" = 3, "Self-Esteem" = 3)) %>%
+    collapse_rows(1, valign = "top") 
+}
+
+levs <- paste(rep(traits$old, each = 3), c("None", "Jail", "CommServ"), sep = "_")
+lin_moder_sf <- nested.moder.mods %>%
+  filter(mod == "linear") %>%
+  select(mod, weighted:moder, hypoth) %>%
+  unnest(hypoth) %>% 
+  separate(term, c("term2", "term", "modval"), sep = "_") %>%
+  mutate(modval = ifelse(is.na(modval), str_remove_all(term, "[A-Z a-z]"), modval),
+         modval = mapvalues(modval, c("lower", "upper"), c("-1 SD", "+1 SD")),
+         modval = paste0(moder, modval),
+         modval = mapvalues(modval, moders2$comb, moders2$new)) %>%
+  mutate(Estimate = sprintf("%.2f<br>[%.2f, %.2f]", Estimate, lwr, upr)) %>%
+  select(weighted:Estimate) %>%
+  left_join(
+    nested.moder.mods %>%
+      filter(mod == "linear") %>%
+      select(mod, weighted:moder, pool) %>%
+      unnest(pool) %>%
+      filter(grepl("age0:groupsJail:", term)|grepl("age0:groupsCommServ:", term)) %>%
+      mutate(term = str_remove_all(term, "age0:groups"),
+             sig = ifelse(sign(CI.lower)==sign(CI.upper), "sig", "ns")) %>%
+      separate(term, c("term2", "term"), sep = ":") %>%
+      select(weighted:pred, moder, term, term2, sig)
+  ) %>%
+  mutate(Estimate = ifelse(sig == "sig" & !is.na(sig), 
+            sprintf("<strong>%s</strong>", Estimate), Estimate),
+         moder = factor(moder, moders2$Moder, moders2$new_Moder)) %>%
+  select(-sig, -term) %>%
+  pivot_wider(names_from = c("pred", "term2")
+              , values_from = "Estimate"
+              , names_sep = "_") %>%
+  select(weighted:modval, one_of(levs), -groups) %>%
+  group_by(weighted) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, weighted, lin_moder_sf_tab))
+
+```
+
+```{r}
+lin_moder_sf$tab[[2]]
+```
+
+### Nonlinear Models  
+```{r}
+spl_moder_tab_fun <- function(d, weight){
+  options(papaja.na_string = "")
+  tab <- d %>%
+        mutate(groups = factor(groups, levels = c("Jail", "CommServ")),
+           moder = factor(moder, levels = unique(moders2$new_Moder)),
+           t2 = factor(t2, levels = unique(d$t2))) %>%
+    arrange(groups, moder, t2) %>%
+    select(-groups, -t1) %>%
+    kable(., "html", booktabs = T, escape = F,
+          col.names = c("Moderator",  "Group", rep("b [CI]", times = 4)),
+          caption = sprintf("<strong>Table X</strong><br><em>Moderators of Pre-Post Change Within-Groups for %s Models", weight),
+          align = c("l", "l", rep("c", 4))) %>%
+    kable_styling(full_width = F) %>%
+    add_header_above(c(" " = 2, "Sensation Seeking" = 1, "Impulsivity" = 1, "Depression" = 1, "Self Esteem" = 1)) %>%
+    kableExtra::group_rows("Incarceration", 1, 11) %>%
+    kableExtra::group_rows("Community Service", 12, 22) 
+  save_kable(tab, file = sprintf("%s/results/tables/spline/%s_moder_level_tab.html", data_path, weight))
+  return(tab)
+}
+
+# tv_group:modvalue, differences in difference in level of contact group after contact as a function of mod
+# groups:modvalue, differences in difference in level of contact and no contact groups as a function of mod val
+# wave0:tv_group:modvalue, differences in difference in slopes of contact group after contact as a function of mod
+# wave0:groups:modvalue, differences in difference in slope of contact and no contact groups as a function of mod val
+nl2g_moder_tab <- results.tab  %>%
+  filter(mod != "linear" & grepl(":modval", term) & !grepl("wave", term)) %>%
+  mutate(term = str_remove_all(term, "groups"),
+         term = str_remove_all(term, "wave0:"),
+         term = str_replace_all(term, "modvalue", moder)) %>%
+  separate(term, c("t1", "t2"), sep = ":") %>%
+  pivot_wider(names_from = "est", values_from = "value") %>%
+  mutate(t1 = ifelse(t1 == "tv_group", "Contact: Pre-Post", "None v Contact"),
+         moder = mapvalues(moder, moders2$Moder, moders2$new_Moder),
+         t2 = mapvalues(t2, moders3$old, moders3$new),
+         estimate = sprintf("%s<br>%s", b, CI)) %>%
+  select(-b, -CI) %>%
+  pivot_wider(names_from = "pred", values_from = "estimate") %>%
+  select(groups, weighted, moder, t1, t2, contains(traits$old)) %>% 
+  filter(t1 != "None v Contact") %>%
+  group_by(weighted) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, weighted, spl_moder_tab_fun))
+```
+
+
+
+```{r}
+nl2g_moder_tab$tab[[2]]
+
+nested.moder.mods %>%
+  select(mod, weighted:moder, pool) %>%
+  unnest(pool) %>%
+  filter(weighted == "weighted" & grepl("tv_g", term) & !grepl("wave", term)) %>%
+  filter(moder == "DemRace")
+```
+
+#### Simple Effects  
+```{r}
+nl2g_moder_sf_tab <- function(d, weighted){
+  d %>% 
+    select(-groups) %>%
+    kable(.
+          , "html"
+          , escape = F
+          , col.names = c("Moderator", "", rep("b [CI]", 8))
+          , align = c("r", "r", rep("c", 8))) %>%
+    kable_styling(full_width = F) %>%
+    add_header_above(c(" " = 2, "Pre" = 1, "Post" = 1, "Pre" = 1, "Post" = 1,
+                     "Pre" = 1, "Post" = 1, "Pre" = 1, "Post" = 1)) %>%
+    add_header_above(c(" " = 2, "Sensation Seeking" = 2, "Impulsivity" = 2, 
+                       "Depressive Symptoms" = 2, "Self-Esteem" = 2)) %>%
+    collapse_rows(1, valign = "top") %>% 
+    kableExtra::group_rows("Community Service", 1, 23) %>%
+    kableExtra::group_rows("Incarceration", 24, 46)
+}
+
+levs <- paste(rep(traits$old, each = 2), c("Pre", "Post"), sep = "_")
+nl2g_moder_sf <- nested.moder.mods %>%
+  filter(mod == "spline") %>%
+  select(mod, weighted:moder, hypoth) %>%
+  unnest(hypoth) %>%
+  separate(term, c("term2", "term", "modval"), sep = "_") %>%
+  mutate(modval = ifelse(is.na(modval), str_remove_all(term, "[A-Z a-z]"), modval),
+         modval = mapvalues(modval, c("lower", "upper"), c("-1 SD", "+1 SD")),
+         modval = paste0(moder, modval),
+         modval = mapvalues(modval, moders2$comb, moders2$new)) %>%
+  mutate(Estimate = sprintf("%.2f<br>[%.2f, %.2f]", Estimate, lwr, upr)) %>%
+  select(weighted:Estimate) %>%
+  left_join(
+    nested.moder.mods %>%
+      filter(mod == "spline") %>%
+      select(mod, weighted:moder, pool) %>%
+      unnest(pool) %>%
+      filter(grepl("tv_group:mod", term)) %>%
+      mutate(term = str_remove_all(term, "tv_group:"),
+             sig = ifelse(sign(CI.lower)==sign(CI.upper), "sig", "ns")) %>%
+      select(weighted:moder, term, sig)
+  ) %>%
+  mutate(Estimate = ifelse(sig == "sig" & !is.na(sig), 
+            sprintf("<strong>%s</strong>", Estimate), Estimate),
+         moder = factor(moder, moders2$Moder, moders2$new_Moder)) %>%
+  select(-sig, -term) %>%
+  pivot_wider(names_from = c("pred", "term2")
+              , values_from = "Estimate"
+              , names_sep = "_") %>%
+  select(weighted:modval, one_of(levs)) %>%
+  group_by(weighted) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, weighted, nl2g_moder_sf_tab))
+```
+
+```{r}
+nl2g_moder_sf$tab[[2]]
+```
+
+
+## Plot Results  
+### Linear  
+### Non-Linear  
+```{r}
+plot_moder_fun <- function(d, moder, weight, mod, gr){
+  md <- moders2 %>% filter(Moder == moder)
+  cols <- c("black", "grey40", "grey70")[1:nrow(md)]
+  if(mod == "spline"){
+    p <- d %>% 
+      mutate(wave0 = ifelse(abs(wave0) > .05, round(wave0, 1), wave0)) %>%
+      distinct() %>%
+      full_join(d %>% select(dv, groups, modvalue) %>%
+                  filter(groups != "None") %>%
+                  distinct() %>%
+                  mutate(wave0 = 0, pred = NA)) %>%
+      select(-tv_group, -age_c) %>%
+      group_by(dv, groups, modvalue, wave0) %>%
+      summarise_all(mean, na.rm = T) %>%
+      ungroup() %>%
+      distinct() %>%
+      mutate(modvalue = mapvalues(modvalue, md$old, md$new)
+             , dv = factor(dv, traits$old, traits$breaks)) %>%
+      ggplot(aes(x = wave0
+                 , y = pred
+                 , color = modvalue
+                 , linetype = modvalue
+                 , group = modvalue)) +
+        scale_color_manual(values = cols) +
+        scale_x_continuous(limits = c(-10.2, 10.2), breaks = seq(-10, 10, 5)) + 
+        geom_line(size = 1) +
+        labs(x = "Wave (Centered at Average Age of Contact)"
+             , y = "Predicted Level"
+             , color = NULL
+             , linetype = NULL
+             , title = sprintf("%s Nonlinear Trajectories Across Contact Groups and %s"
+                               , str_to_title(weight), unique(md$new_Moder))) + 
+        facet_grid(groups ~ dv)  + 
+        theme_classic() + 
+        theme(panel.background = element_rect(color = "black", size = .8)
+            , strip.background = element_blank()
+            , strip.text = element_text(face = "bold", size = rel(1.1))
+            , legend.position = "bottom"
+            , legend.text = element_text(face = "bold", size = rel(.9))
+            , axis.line = element_line(size = .1)
+            , axis.text = element_text(face = "bold", size = rel(1), color = "black")
+            , axis.title = element_text(face = "bold", size = rel(1.1)),
+              plot.title = element_text(face = "bold", size = rel(1.2), hjust = .5))
+  } else {
+    p <- d %>%
+      group_by(dv, age0, groups, modvalue) %>%
+      summarize_all(mean) %>%
+      mutate(dv = factor(dv, levels = traits$old, traits$breaks),
+             groups = factor(groups, levels = c("None", "Jail", "CommServ")
+                             , labels = c("Neither", "Incarceration", "Community\nService"))
+             , modvalue = mapvalues(modvalue, md$old, md$new)) %>%
+      ggplot(aes(x = age0*5 + 14
+                 , y = pred
+                 , color = modvalue
+                 , linetype = modvalue
+                 , group = modvalue)) +
+        scale_color_manual(values = cols) + # colors 
+        geom_line(size = .9) + # add the line
+        labs(x = "Age (Centered at 14)" # titles
+             , y = "Predicted Level"
+             , color = NULL
+             , linetype = NULL
+             , title = sprintf("%s Linear Trajectories Across Contact Groups and %s"
+                               , str_to_title(weight), unique(md$new_Moder))) + 
+        facet_grid(groups ~ dv) + # faceting
+        theme_classic() + 
+        theme(panel.background = element_rect(color = "black", size = .8),
+              axis.text = element_text(face = "bold", size = rel(1.2)),
+              axis.title = element_text(face = "bold", size = rel(1.2)),
+              strip.text = element_text(face = "bold", size = rel(1.2)),
+              strip.background = element_blank(),
+              legend.text = element_text(face = "bold"),
+              legend.title = element_text(face = "bold", size = rel(1.2)),
+              legend.position = "bottom",
+              plot.title = element_text(face = "bold", size = rel(1.2), hjust = .5))
+  }
+  ggsave(p
+         , file = sprintf("%s/results/plots/%s/%s_trajectories_%s.png", data_path, mod, weight, moder)
+         , height = 6
+         , width = 10)
+  return(p)
+}
+
+nested.moder.mods %>% 
+  group_by(mod) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(data = map(data, ~(.) %>% 
+      select(weighted, dv = pred, mod_type = groups, moder, pred.fx) %>%
+      unnest(pred.fx) %>%
+      group_by(weighted, moder, mod_type) %>%
+      nest() %>%
+      ungroup())) %>%
+  unnest(data) %>% 
+  mutate(pmap(list(data, moder, weighted, mod, mod_type), plot_moder_fun))
+```
+
+```{r}
+plot_sig_moder_fun <- function(d, moder, weight, mod, gr, nsig){
+  md <- moders2 %>% filter(Moder == moder)
+  cols <- c("black", "grey40", "grey70")[1:nrow(md)]
+  if(mod == "spline"){
+    p <- d %>% 
+      mutate(wave0 = ifelse(abs(wave0) > .05, round(wave0, 1), wave0)) %>%
+      distinct() %>%
+      full_join(d %>% select(dv, groups, modvalue) %>%
+                  filter(groups != "None") %>%
+                  distinct() %>%
+                  mutate(wave0 = 0, pred = NA)) %>%
+      select(-tv_group, -age_c) %>%
+      group_by(dv, groups, modvalue, wave0) %>%
+      summarise_all(mean, na.rm = T) %>%
+      ungroup() %>%
+      distinct() %>%
+      mutate(modvalue = mapvalues(modvalue, md$old, md$new)
+             , dv = factor(dv, traits$old, traits$breaks)) %>%
+      ggplot(aes(x = wave0
+                 , y = pred
+                 , color = modvalue
+                 , linetype = modvalue
+                 , group = modvalue)) +
+        scale_color_manual(values = cols) +
+        scale_x_continuous(limits = c(-10.2, 10.2), breaks = seq(-10, 10, 5)) + 
+        geom_line(size = 1) +
+        labs(x = "Wave (Centered at Average Age of Contact)"
+             , y = "Predicted Level"
+             , color = NULL
+             , linetype = NULL
+             , title = sprintf("%s Nonlinear Trajectories Across Contact Groups and %s"
+                               , str_to_title(weight), unique(md$new_Moder))) + 
+        facet_grid(groups~dv)  + 
+        theme_classic() + 
+        theme(panel.background = element_rect(color = "black", size = .8)
+            , strip.background = element_blank()
+            , strip.text = element_text(face = "bold", size = rel(1.1))
+            , legend.position = "bottom"
+            , legend.text = element_text(face = "bold", size = rel(.9))
+            , axis.line = element_line(size = .1)
+            , axis.text = element_text(face = "bold", size = rel(1), color = "black")
+            , axis.title = element_text(face = "bold", size = rel(1.1)),
+              plot.title = element_text(face = "bold", size = rel(1.2), hjust = .5))
+} else {
+    p <- d %>%
+      group_by(dv, age0, groups, modvalue) %>%
+      summarize_all(mean) %>%
+      mutate(dv = factor(dv, levels = traits$old, traits$breaks),
+             groups = factor(groups, levels = c("None", "Jail", "CommServ")
+                             , labels = c("Neither", "Incarceration", "Community\nService"))
+             , modvalue = mapvalues(modvalue, md$old, md$new)) %>%
+      ggplot(aes(x = age0*5 + 14
+                 , y = pred
+                 , color = modvalue
+                 , linetype = modvalue
+                 , group = modvalue)) +
+        scale_color_manual(values = cols) + # colors 
+        geom_line(size = .9) + # add the line
+        labs(x = "Age (Centered at 14)" # titles
+             , y = "Predicted Level"
+             , color = NULL
+             , linetype = NULL
+             , title = sprintf("%s Linear Trajectories Across Contact Groups and %s"
+                               , str_to_title(weight), unique(md$new_Moder))) + 
+        facet_wrap(~dv + groups) + # faceting
+        theme_classic() + 
+        theme(panel.background = element_rect(color = "black", size = .8),
+              axis.text = element_text(face = "bold", size = rel(1.2)),
+              axis.title = element_text(face = "bold", size = rel(1.2)),
+              strip.text = element_text(face = "bold", size = rel(1.2)),
+              strip.background = element_blank(),
+              legend.text = element_text(face = "bold"),
+              legend.title = element_text(face = "bold", size = rel(1.2)),
+              legend.position = "bottom",
+              plot.title = element_text(face = "bold", size = rel(1.2), hjust = .5))
+  }
+  # ggsave(p
+  #        , file = sprintf("%s/results/plots/%s/%s_trajectories_%s.png", data_path, mod, weight, moder)
+  #        , height = 6
+  #        , width = 10)
+  return(p)
+}
+
+sig_moder <- nested.moder.mods %>%
+  select(mod, weighted:moder, pool) %>%
+  unnest(pool) %>%
+  filter((mod == "linear" & grepl("age0:gr", term) & grepl("modval", term)) | 
+         (mod == "spline" & grepl("tv_group", term) & grepl("modvalue", term))) %>%
+  mutate(sig = ifelse(sign(CI.lower) == sign(CI.upper), "sig", "ns")) %>%
+  filter(sig == "sig") %>%
+  select(mod, weighted, dv = pred, mod_type = groups, moder, sig) %>%
+  distinct()
+
+sig_moder_plots <- nested.moder.mods %>% 
+  group_by(mod) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(data = map(data, ~(.) %>% 
+      select(weighted, dv = pred, mod_type = groups, moder, pred.fx) %>%
+      unnest(pred.fx) %>%
+      group_by(weighted, moder, mod_type, dv) %>%
+      nest() %>%
+      ungroup())) %>%
+  unnest(data) %>%
+  right_join(sig_moder) %>%
+  group_by(weighted, moder, mod, mod_type) %>%
+  nest() %>%
+  mutate(nsig = map_dbl(data, nrow), 
+         data = map(data, unnest, data),
+         p = pmap(list(data, moder, weighted, mod, mod_type, nsig), plot_sig_moder_fun))
+```
+
+
+```{r, eval = F}
+save(alpha.sum, grp.randeff, int.tab, mlChange.tab, 
+     print.lim.tab, raneff.tab, res_plot, res.print, ind_plot,
+     results.tab, slopes.tab, file = sprintf("%s/manuscript/res.tabs.RData", data_path))
+```
+
