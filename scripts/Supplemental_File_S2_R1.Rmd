@@ -46,6 +46,7 @@ library(lme4)
 library(MuMIn)
 library(readxl)
 library(gridExtra)
+library(semTools)
 library(knitr)
 library(kableExtra)
 library(plyr)
@@ -947,9 +948,6 @@ nested.psw <- nested.psw %>%
 ```
 
 
-
-
-
 ```{r print bal plot1, fig.height = 9, fig.width = 6.5, eval = F}
 f <- nested.psw$plots
 
@@ -975,7 +973,7 @@ save(nested.psw, file = sprintf("%s/results/psw_small.RData", data_path))
 ```{r clear envir, include = F}
 # clear up the environment
 all_env <- ls()
-all_env <- all_env[!(all_env %in% c("data_path", "pred_long", "outcome_wide", "match_wide", "group_wide"))]
+all_env <- all_env[!(all_env %in% c("data_path", "pred_long", "outcome_wide", "match_wide", "group_wide", "traits"))]
 rm(list = all_env)
 ```
 
@@ -1027,7 +1025,7 @@ save(nested.sel, file = sprintf("%s/results/selection.RData", data_path))
 ## Pool Results  
 
 ```{r sel pool}
-load(sprintf("%s/results/selection.RData", data_path))
+load(url(sprintf("%s/blob/main/results/selection.RData?raw=true", data_path)))
 
 sel_pool_fun <- function(models, type){
   ###
@@ -1089,8 +1087,6 @@ sel_pool_fun <- function(models, type){
 nested.sel <- nested.sel %>%
   mutate(pool = map(sel.mod, possibly(sel_pool_fun, NA_real_))) 
 
-
-
 sel.tab <- nested.sel %>%
   select(-sel.mod) %>%
   unnest(pool, .drop = T) %>% 
@@ -1104,6 +1100,26 @@ sel.tab <- nested.sel %>%
   filter(term == "value")
 
 save(sel.tab, file = sprintf("%s/results/selection_res.RData", data_path))
+
+sel.kable <- sel.tab %>%
+  mutate(est = sprintf("%.2f [%.2f, %.2f]", Estimate, CI.lower, CI.upper)
+         , est = ifelse(sig == "sig", sprintf("<strong>%s</strong>", est), est)) %>%
+  select(Trait, weight, group, est) %>%
+  pivot_wider(names_from = c("group", "weight")
+              , values_from = "est") %>%
+  select(Trait, Incarcerated_unweighted, Incarcerated_weighted, COV_unweighted, COV_weighted) %>%
+  arrange(Trait) %>%
+  kable(.
+        , "html"
+        , escape = F
+        , caption = "<strong>Table 1</strong><br><em>Unweighted and Weighted Effects of Baseline Personality on the Probability of Experiencing Incarceration or Community Service</em>"
+        , col.names = c("Trait", rep("OR [CI]", 4))
+        , align = c("r", rep("c", 4))) %>%
+  kable_styling(full_width = F) %>%
+  add_header_above(c(" " = 1, "Incarceration" = 2, "Community Service" = 2)) %>%
+  add_footnote(" The reference group was individuals neither in the Incarceration nor Community Service groups. OR = Odds ratio. CI = Confidence interval. Bolded values represent estimated ORs whose CIs do not overlap with 1.")
+sel.kable
+save_kable(sel.kable, file = sprintf("%s/results/tables/Table_1_Selection.html", local_path))
 
 sel.tab %>% 
   filter(weight == "weighted") %>%
@@ -1134,15 +1150,21 @@ First, we look at the correlations between each of the 4 outcomes across ages.
 
 ```{r soc cors, results = 'asis', eval = T}
 r_fun <- function(df, Item){
-  print(knitr::kable(
-    (df %>% select(PROC_CID, age, value) %>%
+  tab <- df %>% 
+    select(PROC_CID, age, value) %>%
     spread(age, value) %>%
     select(-PROC_CID) %>%
-    cor(., use = "pairwise")),
-    format = "html", booktabs = T, digits = 2,
-    caption = sprintf("Correlations of %s Over Ages", Item)) %>%
+    cor(., use = "pairwise") %>%
+    kable(.
+          , format = "html"
+          , booktabs = T
+          , digits = 2
+          , caption = sprintf("<strong>Table S%s</strong><br><em>Correlations of %s Over Ages<r/em>", sup_tables, Item)) %>%
     kable_styling(bootstrap_options = c("striped","repeat_header"),
-                  full_width = F))
+                  full_width = F)
+  save_kable(tab, file = sprintf("%s/results/tables/Table_S%s_%s_Cor.html", local_path, sup_tables, Item))
+  sup_tables <<- sup_tables + 1
+  print(tab)
 }
 
 pred_cor <- pred_long %>%
@@ -1151,13 +1173,12 @@ pred_cor <- pred_long %>%
   group_by(item) %>%
   nest() 
 
-pred_cor %>%
+pred_cor<-pred_cor %>%
   mutate(r = map2(data, item, r_fun))
 ```
 
 ## Measurement Invariance  
 ```{r Q2 functions}
-
 minv_f_fun <- function(df){
   # number of items
   items <- sort(as.numeric(unique(df$item_num)))
