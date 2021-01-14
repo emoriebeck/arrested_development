@@ -54,17 +54,13 @@ library(tidyverse)
 library(furrr)
 ```
 
-```{r, echo=F}
-setwd("~/Dropbox (Brown)/The Clink/results")
-```
-
 
 ## Working Directory  
 
 
 ```{r data path}
-data_path <- "~/Dropbox (Brown)/The Clink"
-data_path <- "/Volumes/Emorie Beck/projects/The Clink"
+local_path <- "/Volumes/Emorie Beck/projects/The Clink"
+data_path <- "https://github.com/emoriebeck/arrested_development"
 ```
 
 ## Load Data  
@@ -73,7 +69,7 @@ First, we will lead in a Google Sheet that indexes original variable names in th
 
 ```{r load data}
 # load codebook sheet containing variable names, recoding, etc #
-codebook_path <- sprintf("%s/data/codebook.xlsx", data_path) 
+codebook_path <- sprintf("%s/blob/main/data/codebook.xlsx?raw=true", data_path) 
 # create a meta file for downloading the child data
 # dat %>% gs_read(ws = "Child") %>% select(`QName`, year) %>%
 #   write_delim(path = paste(data_path, "meta.CHILDYA", sep = "/"), delim = ",", col_names = F)
@@ -81,17 +77,20 @@ codebook_path <- sprintf("%s/data/codebook.xlsx", data_path)
 # dat %>% gs_read(ws = "Mom") %>% select(`QName`, year) %>%
 #   write_delim(path = paste(data_path, "meta.NLSY79", sep = "/"), delim = ",", col_names = F)
 
+p1f <- tempfile()
+download.file(codebook_path, p1f, mode="wb")
+
 # grab the child and mother data of variables chosen to include 
-child <- codebook_path %>% read_xlsx(., sheet = "Child") %>% filter(Include == "Yes")
-mom   <- codebook_path %>% read_xlsx(., sheet = "Mom") %>% filter(Include == "Yes")
-match <- codebook_path %>% read_xlsx(., sheet = "Items") %>% filter(Included == "x")
-moder <- codebook_path %>% read_xlsx(., sheet = "Moderators") 
+child <- read_excel(p1f, sheet = "Child") %>% filter(Include == "Yes")
+mom   <- read_excel(p1f, sheet = "Mom") %>% filter(Include == "Yes")
+match <- read_excel(p1f, sheet = "Items") %>% filter(Included == "x")
+moder <- read_excel(p1f, sheet = "Moderators") 
 ```
 
 ```{r raw data load, eval = F}
 # load in the Rdata files of the raw, uncleaned NLSY data sets
-load(paste(data_path, "/data/nlsy79cya/nlsy79cya.RData", sep = "/"))
-load(paste(data_path, "data/nlsy79/nlsy79moms.RData", sep = "/"))
+load(paste(local_path, "/data/nlsy79cya/nlsy79cya.RData", sep = "/"))
+load(paste(local_path, "data/nlsy79/nlsy79moms.RData", sep = "/"))
 
 # cut additional variables not included in the present analyses
 new_data <- tbl_df(new_data) %>% select(one_of(child$RNUM))
@@ -119,7 +118,7 @@ traits <- tibble(
 ```
 
 ```{r}
-load(paste(data_path, "data/data.rdata", sep = "/"))
+load(sprintf("%s/data/data.rdata", local_path))
 ```
 
 # Data Cleaning  
@@ -335,7 +334,7 @@ match_wide <- match_long3 %>%
 ## norm height and weight information by age) ##
 # height and weight are tricky, so instead of using sometimes unreliable raw height and weight data, we will use 
 # the World Health Organization's norms to calculate height-for-age and weight-for-age percentiles
-source(paste(data_path, "data/who2007_R/who2007.R", sep = "/"))
+source(paste(data_path, "raw/main/data/who2007_R/who2007.r", sep = "/"))
 htwt <- match_long3 %>% ungroup() %>%
   # grab height and weight variables for 9-10 year olds
   filter(item %in% c("DemHeightFT_HeightFT", "DemHeightIN_HeightIN", "DemWeightLBS_WeightLBS") & age %in% c(9,10)) %>%
@@ -357,13 +356,13 @@ htwt <- match_long3 %>% ungroup() %>%
   filter(DemWeightLBS_WeightLBS > 30 & DemHeightIN_HeightIN > 30)
 
 htwt <- data.frame(htwt)
-wfawho2007<-read.table(paste(data_path, "data/who2007_R/wfawho2007.txt", sep = "/"), header=T,sep="",skip=0)
-hfawho2007<-read.table(paste(data_path, "data/who2007_R/hfawho2007.txt", sep = "/"),header=T,sep="",skip=0)
-bfawho2007<-read.table(paste(data_path, "data/who2007_R/bfawho2007.txt", sep = "/"),header=T,sep="",skip=0) 
+wfawho2007<-read.table(paste(data_path, "raw/main/data/who2007_R/wfawho2007.txt", sep = "/"), header=T,sep="",skip=0)
+hfawho2007<-read.table(paste(data_path, "raw/main/data/who2007_R/hfawho2007.txt", sep = "/"),header=T,sep="",skip=0)
+bfawho2007<-read.table(paste(data_path, "raw/main/data/who2007_R/bfawho2007.txt", sep = "/"),header=T,sep="",skip=0) 
 who2007(FilePath=paste(data_path, "data", sep = "/"),
         FileLab = "nlsy_who", mydf=htwt, sex=DemCSex, age=ageMon, 
         weight=DemWeightKG_WeightKG, height=DemHeightCM_HeightCM)
-htwt <- read.csv(paste(data_path, "data/nlsy_who_z.csv", sep = "/"), stringsAsFactors = F)  %>%
+htwt <- read.csv(paste(data_path, "raw/main/data/nlsy_who_z.csv", sep = "/"), stringsAsFactors = F)  %>%
   select(PROC_CID, PROC_MID, age, DemCSex, zhfa, zwfa) %>%
   mutate(DemPweight = pnorm(zwfa), DemPheight = pnorm(zhfa)) %>%
   select(-zwfa, -zhfa, -age) %>% ungroup()
@@ -457,8 +456,8 @@ match_wide <- match_wide %>%
 
 
 ```{r print groups}
-table(group_long$groups)
-head(group_long)
+table(group_wide$groups)
+head(group_wide)
 ```
 
 ## Personality   
@@ -524,14 +523,16 @@ alpha.df <- pred_alpha %>%
   group_by(item, year) %>%
   nest() %>%
   mutate(alpha = map_dbl(data, alpha_fun))
-  
-alpha.df %>% 
+
+alpha.tab <- alpha.df %>% 
   select(-data) %>%
   spread(key = item, value = alpha) %>%
   kable(., format = "html", booktabs = T, digits = 2,
-    caption = "Cronbach's Alpha  Over Ages") %>%
+    caption = "<strong>Table S1</strong><br><em>Cronbach's Alpha  Over Ages</br>") %>%
     kable_styling(c("striped","repeat_header"),
                   full_width = F)
+save_kable(alpha.tab, file = sprintf("%s/results/tables/Table_S1_alphas.html", local_path))
+tables <- c(1)
 ```
 
 
@@ -665,18 +666,21 @@ r <- match_wide %>%
   mutate_all(funs(as.numeric)) %>% 
   cor(., use = "pairwise")
 
-data.frame(r) %>% mutate(var = colnames(.)) %>%
+raw.cor <- data.frame(r) %>% mutate(var = colnames(.)) %>%
   gather(key = var2, value = value, -var) %>%
   mutate(value = ifelse(var == var2, 0, value)) %>%
   ggplot(aes(x = var, y = var2, fill = value)) +
   geom_raster() +
+  labs(x = NULL, y = NULL, title = "Figure S1. Heatmap of Zero-Order Correlations Among Matching Variables") +
   scale_fill_gradient2(low = "blue", mid = "white", high = "red",
                        limit = c(-1,1), midpoint = 0) +
   theme_classic() +
   theme(axis.text.x = element_text(angle = 90)) 
+raw.cor
+ggsave(raw.cor, file = sprintf("%s/results/plots/Figure_S1.pdf", local_path)
+       , width = 12, height = 12)
+figures <- c(1)
 ```
-
-
 
 ## MI Procedure  
 
@@ -711,7 +715,7 @@ nlsy.mdf <- missing_data.frame(data.frame(unclass(match_wide)))
 image(nlsy.mdf)
 ```
 
-![](plots/mdf.pdf)  
+![](plots/Figure_S2_mdf.pdf)  
 
 ```{r mdf, eval = F}
 # get descriptives of the data
@@ -727,7 +731,7 @@ gc()
 image(nlsy.mi)
 ```
 
-![](plots/mi.pdf)  
+![](plots/Figure_S3_mi.pdf)  
 
 ```{r comp mi, eval = F}
 completed.nlsy <- mi::complete(nlsy.mi)
@@ -758,15 +762,18 @@ temp <- tbl_df(match_wide) %>%
   summarize(n = n(), 
             `% Female` = sum(DemCSex == 2)/ sum(DemCSex %in% c(1,2)),
             `Mean Age 2017` = mean(2017 - Dem_DOBYear, na.rm = T)) 
-  bind_rows(temp, temp %>% ungroup() %>% 
+age_tab <- bind_rows(temp, temp %>% ungroup() %>% 
               summarize(n = sum(n), 
                         `% Female` = mean(`% Female`), groups = "Total",
                         `Mean Age 2017` = mean(`Mean Age 2017`))) %>%
   kable(., "html", #"latex", 
           escape = F, booktabs = T, digits = 2,
-          col.names = c("Group", "N", "% Female", "Mean Age 2017")) %>%
+          col.names = c("Group", "N", "% Female", "Mean Age 2017")
+        , caption = "<strong>Table S2</strong><br><em>Count, Age, and Gender Breakdown Across Groups</em>") %>%
   # kable_styling(latex_options = c("striped","repeat_header"),full_width = F)
     kable_styling(bootstrap_options = c("striped","repeat_header"),full_width = F)
+save_kable(age_tab, file = sprintf("%s/results/tables/Table_S2_descriptives.html", local_path))
+age_tab
 ```
 
 
@@ -870,7 +877,7 @@ gc()
 Once propensity scores are estimated, `bal.table()` produces a table that shows how well the resulting weights succeed in manipulating the groups so that they match on pre-adolescent matching characteristics.  
 
 ```{r bal tabs, message = F, warning = F, results = 'asis'}
-load(sprintf("%s/results/psw_small.RData", data_path))
+load(sprintf("%s/results/psw.RData", local_path))
 # this table identifies variables differences in effect size pre and post weighting
 diff.tab <- nested.psw %>% filter(match_set == "socialization") %>%
   unnest(bal.tab) %>%
@@ -881,15 +888,17 @@ diff.tab <- nested.psw %>% filter(match_set == "socialization") %>%
   spread(key = stop.method, value = m.eff) %>%
   mutate(diff = unw - es.mean) %>%
   arrange(diff)
-kable(diff.tab, "html", digits = 3,
+diff.tab <- kable(diff.tab, "html", digits = 3,
       longtable = T, booktabs = T, escape = F,
       col.names = c("Group 1", "Group 2", "Matching<br>Variable",
                     "Weighted<br>Effect Size", "Unweighted<br>Effect Size",
                     "Change<br>Effect Size"),
-      caption = "Change in Effect Size after Propensity Score Weighting") %>%
+      caption = "<strong>Table S3</strong><br><em>Change in Effect Size after Propensity Score Weighting<em>") %>%
   # kable_styling(latex_options = c("striped","repeat_header"),full_width = F)
   kable_styling(bootstrap_options = c("striped","repeat_header"),full_width = F) %>%
-  scroll_box(width = "750px", height = "400px")
+  scroll_box(width = "750px", height = "800px")
+save_kable(diff.tab, file = sprintf("%s/results/tables/Table_S3_PSW_diff.html", local_path))
+diff.tab
 
 # this table shows variables that are not matched after weighting
 unbal.tab <- nested.psw %>%  
@@ -934,9 +943,7 @@ print_plot_fun <- function(p, Chain){
 }
 par(mfrow = c(2,5))
 nested.psw <- nested.psw %>% 
-  mutate(imp.data.long = map2(psw, imp.data, possibly(add_psw_weights, NA_real_)),
-         plots = map(psw, possibly(~plot(., plots = "es"), NA_real_)),
-         plots = map2(plots, chain, possibly(print_plot_fun, NA_real_)))
+  mutate(imp.data.long = map2(psw, imp.data, possibly(add_psw_weights, NA_real_)))
 ```
 
 
@@ -944,9 +951,9 @@ nested.psw <- nested.psw %>%
 
 
 ```{r print bal plot1, fig.height = 9, fig.width = 6.5, eval = F}
-plots <- nested.psw$plots
+f <- nested.psw$plots
 
-do.call("grid.arrange", args = list(grobs = plots[1:6], nrow = 3))
+do.call("grid.arrange", args = list(grobs = plots[1:10], nrow = 5))
 ```
 
 
@@ -1779,10 +1786,11 @@ d <- nested.mods %>%
          group = ifelse(grepl("jailcomm", term), "Both", group),
          # group = ifelse(is.na(group) == T, "Comm Serv", "Incarceration"),
          sig = ifelse(p < .05, "sig", "ns"), 
+         gamma = sprintf("%.2f<br>[%.2f, %.2f]", Estimate, CI.lower, CI.upper),
          groups = ifelse(groups == "Jail", "Incarceration", groups)) %>%
-  select(pred, mod, d, groups, group, sig)
+  select(pred, mod, d, gamma, groups, group, sig)
 
-levs <- c("Neither.b", "Neither.CI", paste(rep(c("Incarceration", "Comm Serv"), each = 3), rep(c("b", "CI", "d"), times = 2), sep = "."), "Both.b", "Both.CI", "Both.d")
+levs <- c("Neither.b", "Neither.gamma", paste(rep(c("Incarceration", "Comm Serv"), each = 3), rep(c("b", "gamma", "d"), times = 2), sep = "."), "Both.b", "Both.gamma", "Both.d")
 
 slopes.tab <- nested.mods %>% 
   filter(mod == "linear")  %>%
@@ -1795,11 +1803,12 @@ slopes.tab <- nested.mods %>%
   # select(-groups) %>%
   left_join(d %>% filter(mod == "linear")) %>%
   mutate_at(vars(Estimate:upr, d), funs(ifelse(!is.na(.) == T, sprintf("%.2f", .), ""))) %>%
-  mutate(d = ifelse(sig == "sig", sprintf("<strong>%s</strong>", d), d),
-         CI = sprintf("[%s, %s]", lwr, upr)) %>%
-  select(pred, mod, groups, group, Estimate, d, CI) %>%
-  rename(b = Estimate) %>%
-  gather(key = est, value = value, b, CI, d, na.rm = T) %>%
+  mutate_at(vars(d, gamma), ~ifelse(sig == "sig", sprintf("<strong>%s</strong>", .), .)) %>%
+  mutate(#d = ifelse(sig == "sig", sprintf("<strong>%s</strong>", d), d),
+         b = sprintf("%s<br>[%s, %s]", Estimate, lwr, upr)) %>%
+  select(pred, mod, groups, group, b, gamma, d) %>%
+  # rename(b = Estimate) %>%
+  gather(key = est, value = value, b, gamma, d, na.rm = T) %>%
   unite(tmp, group, est, sep = ".") %>%
   mutate(tmp = factor(tmp, levels = levs)) %>%
   arrange(pred, tmp) %>%
@@ -1828,11 +1837,11 @@ lin.tab <- slopes.tab  %>%
   kable(.
         , "html"
         , escape = F
-        , col.names = c(" ", "<em>b</em>", "CI", "<em>b</em>", "CI", "<em>d</em>", "<em>b</em>", "CI", "<em>d</em>")
-        , align = c("r", rep("c", 8))
+        , col.names = c(" ", "<em>est.</em> [CI]", "<em>est.</em> [CI]", "<em>\\gamma_{11} </em> [CI]", "<em>d</em>",  "<em>b</em> [CI]", "<em>\\gamma_{12} </em> [CI]", "<em>d</em>")
+        , align = c("r", rep("c", 7))
         , caption = "<strong>Table X</strong><br><em>Mean Personality Trait Change or Incarceration, Court-Ordered Community Service, and Neither Participants</em>") %>% 
   kable_styling(full_width = F) %>%
-  add_header_above(c(" " = 1, "Neither" = 2, "Incarceration" = 2, " " = 1, "Community Service" = 2, " " = 1)) %>%
+  add_header_above(c(" " = 1, "Neither" = 1, "Incarceration" = 1, " " = 2, "Community Service" = 1, " " = 2)) %>%
   add_footnote("Note. The reference group was individuals neither in the Incarceration nor Court-Ordered Community Service groups. Cohen's d is calculated by dividing the difference in mean slope between groups by the standard deviation of the random intercepts of personality scores at age 14. CI = confidence interval. Bolded values represent estimated mean differences in change between groups whose CIs do not overlap with 0.", notation = "none")
 
 lin.tab
