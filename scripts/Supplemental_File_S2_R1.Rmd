@@ -1237,7 +1237,7 @@ mi_fun <- function(df, args){
 }
 ```
 
-```{r}
+```{r, eval = F}
 rep_fun <- function(df){
    rem <- max(df$item_num)%%3
    total <- floor(max(df$item_num)/3)
@@ -1297,26 +1297,9 @@ save(minv_nested, file = sprintf("%s/results/meas_inv_small.RData", data_path))
 ```
 
 ```{r}
+load(sprintf("%s/results/meas_inv_small.RData", local_path))
 comb <- paste(rep(traits$old, each = 3),
               rep(c("cfi", "rmsea", "srmr"), times = 4), sep = ".") 
-
-minv_nested %>% 
-  unnest(res) %>% 
-  # filter(.id == "metric") %>%
-  select(pred, type = .id, cfi, rmsea, srmr, cfi_delta, rmsea_delta, delta_Chisq, p_Chisq) %>%
-  unite(tmp, Trait, measure, sep = ".") %>%
-  mutate(tmp = factor(tmp, levels = comb),
-         Event = mapvalues(Event, c("none", events$old_event), c("Mean", events$new_event)),
-         Event = factor(Event, levels = c("Mean", events$new_event))) %>%
-  spread(tmp, value) %>%
-  arrange(Event) %>%
-  # select(-.id) %>%
-  kable(., "html", booktabs = T, escape = F, digits = 2,
-        col.names = c("Event", rep(c("CFI", "RMSEA", "SRMR"), time = 5))) %>%
-  kable_styling(full_width = F) %>%
-  add_header_above(c(" " = 1, "Extraversion" = 3, "Agreeableness" = 3,
-                     "Conscientiousness" = 3, "Emotional Stability" = 3,
-                     "Openness" = 3))
 ```
 
 
@@ -1388,12 +1371,13 @@ pred_groups <- pred_long %>%
          frstyear = ifelse(!is.na(cont_year) & year %in% c(cont_year, cont_year + 2), 1, 0)) %>%
   ungroup()
          ## create change variables
+pred_groups
 ```
 
 ## Setup Data   
 ### Basic Linear Growth Model  
-```{r}
-load(sprintf("%s/results/psw_small.RData", data_path))
+```{r, eval = F}
+load(sprintf("%s/results/psw_small.RData", local_path))
 
 save_fun <- function(d, chain, item){
   save(d, file = sprintf("%s/data/model_data/linear/%s_%s_threegroup.RData", data_path, item, chain))
@@ -1419,7 +1403,7 @@ imp.data.psw %>%
 ```
 
 ### Two-Group Model  
-```{r}
+```{r, eval = F}
 save_fun <- function(d, chain, item, target){
   save(d, file = sprintf("%s/data/model_data/spline/%s_%s_%s.RData", data_path, item, chain, target))
 }
@@ -1734,8 +1718,8 @@ Now, we actually pool the fixed and random effects, both for average effects, as
 ```{r}
 loadRData <- function(fileName, form, type, obj){
 #loads an RData file, and returns it
-    path <- sprintf("%s/results/%s/%s/%s_none.RData", data_path, form, type, fileName)
-    load(path)
+    path <- sprintf("%s/blob/main/results/%s/%s/%s_none.RData?raw=true", data_path, form, type, fileName)
+    load(url(path))
     get(ls()[grepl(obj, ls())])
 }
 
@@ -1755,33 +1739,6 @@ nested.mods <- crossing(
          hypoth = map2(file, mod, ~loadRData(.x, .y, "hypoth", "hypoth")))
 ```
 
-```{r}
-loadRData <- function(path, obj){
-#loads an RData file, and returns it
-    load(path)
-    get(ls()[grepl(obj, ls())])
-}
-
-grab_fun <- function(dv, mod, groups, weight){
-  mods <- (tibble(chain = 1:10) %>%
-    mutate(path = sprintf("%s/results/%s/models/%s_%s_chain.%s_%s_none.RData", data_path, mod, weight, dv, chain, groups),
-           mods = map(path, ~loadRData(., "y"))))$mods
-  hypoth <- hyp_tests(mods, mod, groups)
-  save(hypoth, file = sprintf("%s/results/%s/hypoth/%s_%s_%s_none.RData",
-                         data_path, mod, weight, dv, groups))
-}
-
-
-crossing(
-  pred = unique(traits$old),
-  mod = c("linear", "spline"),
-  groups = c("Jail", "CommServ", "threegroup"),
-  weighted = c("weighted", "unweighted")
-  ) %>%
-  filter(mod != "linear" & groups != "threegroup") %>%
-  mutate(pmap(list(pred, mod, groups, weighted), grab_fun))
-```
-
 ## Tables  
 
 ```{r}
@@ -1799,7 +1756,7 @@ d <- nested.mods %>%
   select(pred:weighted, pool) %>%
   unnest(pool) %>%
   filter(grepl(":", term) & !grepl(":age", term)) %>%
-  filter(weighted == "weighted") %>% 
+  # filter(weighted == "weighted") %>% 
   left_join(sd_re) %>%
   mutate(d = Estimate/sd_re, 
          term = ifelse(grepl("tv_gro", term), str_replace(term, "tv_group", groups), term),
@@ -1809,7 +1766,7 @@ d <- nested.mods %>%
          sig = ifelse(p < .05, "sig", "ns"), 
          gamma = sprintf("%.2f<br>[%.2f, %.2f]", Estimate, CI.lower, CI.upper),
          groups = ifelse(groups == "Jail", "Incarceration", groups)) %>%
-  select(pred, mod, d, gamma, groups, group, sig)
+  select(weighted, pred, mod, d, gamma, groups, group, sig)
 
 levs <- c("Neither.b", "Neither.gamma", paste(rep(c("Incarceration", "Comm Serv"), each = 3), rep(c("b", "gamma", "d"), times = 2), sep = "."), "Both.b", "Both.gamma", "Both.d")
 
@@ -1818,7 +1775,7 @@ slopes.tab <- nested.mods %>%
   select(pred:weighted, hypoth) %>% 
   unnest(hypoth) %>%
   separate(term, c("group", "term"), sep = "_") %>%
-  filter(weighted == "weighted") %>% 
+  # filter(weighted == "weighted") %>% 
   filter(grepl("Slope", term)) %>%
   mutate(group = ifelse(group == "CommServ", "Comm Serv", group)) %>%
   # select(-groups) %>%
@@ -1827,7 +1784,7 @@ slopes.tab <- nested.mods %>%
   mutate_at(vars(d, gamma), ~ifelse(sig == "sig", sprintf("<strong>%s</strong>", .), .)) %>%
   mutate(#d = ifelse(sig == "sig", sprintf("<strong>%s</strong>", d), d),
          b = sprintf("%s<br>[%s, %s]", Estimate, lwr, upr)) %>%
-  select(pred, mod, groups, group, b, gamma, d) %>%
+  select(weighted, pred, mod, groups, group, b, gamma, d) %>%
   # rename(b = Estimate) %>%
   gather(key = est, value = value, b, gamma, d, na.rm = T) %>%
   unite(tmp, group, est, sep = ".") %>%
@@ -1851,25 +1808,33 @@ nested.mods %>%
 
 ### Linear Slopes    
 ```{r}
+lin_tab_fun <- function(d, weight){
+  tab_num <- if(weight == "weighted") 2 else paste0("S", sup_tables)
+  cap <-sprintf("<strong>Table %s</strong><br><em>%s Mean Personality Trait Change or Incarceration, Court-Ordered Community Service, and Neither Participants</em>", tab_num, str_to_title(weight))
+  tab <- d %>%
+    select(-mod, -groups, -contains("Both")) %>%
+    kable(.
+          , "html"
+          , escape = F
+          , col.names = c(" ", "<em>est.</em> [CI]", "<em>est.</em> [CI]", "<em>\\gamma_{11} </em> [CI]", "<em>d</em>",  "<em>b</em> [CI]", "<em>\\gamma_{12} </em> [CI]", "<em>d</em>")
+          , align = c("r", rep("c", 7))
+          , caption = cap) %>% 
+    kable_styling(full_width = F) %>%
+    add_header_above(c(" " = 1, "Neither" = 1, "Incarceration" = 1, " " = 2, "Community Service" = 1, " " = 2)) %>%
+    add_footnote("Note. The reference group was individuals neither in the Incarceration nor Court-Ordered Community Service groups. Cohen's d is calculated by dividing the difference in mean slope between groups by the standard deviation of the random intercepts of personality scores at age 14. CI = confidence interval. Bolded values represent estimated mean differences in change between groups whose CIs do not overlap with 0.", notation = "none")
+  save_kable(tab, file = sprintf("%s/results/tables/Table_%s_linear_%s_slopes.html"
+                           , local_path, tab_num, weight))
+  if(weight == "unweighted") sup_tables <<- sup_tables + 1
+  return(tab)
+}
+
 lin.tab <- slopes.tab  %>%
   mutate(pred = factor(pred, traits$old, traits$new)) %>%
   arrange(pred) %>%
-  select(-mod, -groups, -contains("Both")) %>%
-  kable(.
-        , "html"
-        , escape = F
-        , col.names = c(" ", "<em>est.</em> [CI]", "<em>est.</em> [CI]", "<em>\\gamma_{11} </em> [CI]", "<em>d</em>",  "<em>b</em> [CI]", "<em>\\gamma_{12} </em> [CI]", "<em>d</em>")
-        , align = c("r", rep("c", 7))
-        , caption = "<strong>Table X</strong><br><em>Mean Personality Trait Change or Incarceration, Court-Ordered Community Service, and Neither Participants</em>") %>% 
-  kable_styling(full_width = F) %>%
-  add_header_above(c(" " = 1, "Neither" = 1, "Incarceration" = 1, " " = 2, "Community Service" = 1, " " = 2)) %>%
-  add_footnote("Note. The reference group was individuals neither in the Incarceration nor Court-Ordered Community Service groups. Cohen's d is calculated by dividing the difference in mean slope between groups by the standard deviation of the random intercepts of personality scores at age 14. CI = confidence interval. Bolded values represent estimated mean differences in change between groups whose CIs do not overlap with 0.", notation = "none")
-
-lin.tab
-
-save_kable(lin.tab, file = sprintf("%s/results/tables/linear/slopes_tab.html", data_path))
-
-
+  group_by(weighted) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, weighted, lin_tab_fun))
 ```
 
 ### Nonlinear Levels  
@@ -1877,8 +1842,8 @@ save_kable(lin.tab, file = sprintf("%s/results/tables/linear/slopes_tab.html", d
 levs <- paste(rep(traits$old, each = 2), rep(c("Level", "Diff"), times = 4), sep = "_")
 
 nl2g_lev <- nested.mods %>%
-  filter(weighted == "weighted" & groups != "threegroups" & mod == "spline") %>%
-  select(pred:groups, hypoth) %>%
+  filter(groups != "threegroups" & mod == "spline") %>%
+  select(pred:weighted, hypoth) %>%
   unnest(hypoth) %>%
   filter(!grepl("Slope", term)) %>%
   mutate(term = str_replace_all(term, "Either", groups),
@@ -1893,33 +1858,46 @@ nl2g_lev <- nested.mods %>%
          groups = ifelse(Group == "Diff", "Diff", "Level"),
          term2 = ifelse(term == "Int" & Group == "Neither", "None", term2),
          term2 = ifelse(Group == "Diff", ifelse(term == "PrePostInt", "Pre", "None"), term2)) %>%
-  select(pred, model, groups, term2, est) %>%
+  select(weighted, pred, model, groups, term2, est) %>%
   pivot_wider(names_from = c("pred", "groups"),
               values_from = "est"
               , names_sep = "_") %>%
   mutate(model = forcats::fct_rev(factor(model)),
          term2 = factor(term2, c("None", "Pre", "Post"))) %>%
   arrange(model, term2) %>%
-  select(model, term2, levs)
+  select(weighted, model, term2, levs)
+
+nl2g_lev_tab_fun <- function(d, weight){
+  tab_num <- if(weight == "weighted") 3 else paste0("S", sup_tables)
+  cap <-sprintf("<strong>Table %s</strong><br><em>%s Estimated Levels Across Groups at Average Contact Points and Differences Between Groups and Across Contact Points</em>", tab_num, str_to_title(weight))
+  tab <- d %>% 
+    select(-model) %>%
+    kable(., "html"
+          , escape = F
+          , col.names = c("Term", rep(c("Level<br><em>b</em> [CI]", "Difference<br><em>b</em> [CI]"), times = 4))
+          , align = c("r", rep("c", 8))
+          , caption = cap) %>%
+    kable_styling(full_width = F) %>%
+    kableExtra::group_rows("Incarceration", 1, 3) %>%
+    kableExtra::group_rows("Community Service", 4, 6) %>%
+    add_header_above(c(" " = 1, "Sensation Seeking" = 2, "Impulsivity" = 2, "Depressive Symptoms" = 2, 
+                       " Self-Esteem" = 2)) %>%
+    add_footnote(notation = "none"
+                 , label = "Note. None, Pre, and Post Levels indicate estimated average levels in the no contact group (None) or before (Pre) and after (Post) contact in the contact groups. The Difference columns indicate estimated differences in average levels. The ''None'' row indicates the difference between the no contact and contact groups at the average age and wave of contact (i.e. post contact), while the ''Pre'' row indicates the difference in the contact group before and after contact at average wave and age of contact. Bold values in the Difference Column indicate 95% confidence intervals do not overlap with 0.")
+  
+  save_kable(tab, file = sprintf("%s/results/tables/Table_%s_wi_person_%s_slopes.html"
+                           , local_path, tab_num, weight))
+  if(weight == "unweighted") sup_tables <<- sup_tables + 1
+  return(tab)
+}
 
 nl2g_lev_tab <- nl2g_lev %>%
-  select(-model) %>%
-  kable(., "html"
-        , escape = F
-        , col.names = c("Term", rep(c("Level<br><em>b</em> [CI]", "Difference<br><em>b</em> [CI]"), times = 4))
-        , align = c("r", rep("c", 8))
-        , caption = "<strong>Table X</strong><br><em>Estimated Levels Across Groups at Average Contact Points and Differences Between Groups and Across Contact Points") %>%
-  kable_styling(full_width = F) %>%
-  kableExtra::group_rows("Incarceration", 1, 3) %>%
-  kableExtra::group_rows("Community Service", 4, 6) %>%
-  add_header_above(c(" " = 1, "Sensation Seeking" = 2, "Impulsivity" = 2, "Depressive Symptoms" = 2, 
-                     " Self-Esteem" = 2)) %>%
-  add_footnote(notation = "none"
-               , label = "Note. None, Pre, and Post Levels indicate estimated average levels in the no contact group (None) or before (Pre) and after (Post) contact in the contact groups. The Difference columns indicate estimated differences in average levels. The ''None'' row indicates the difference between the no contact and contact groups at the average age and wave of contact (i.e. post contact), while the ''Pre'' row indicates the difference in the contact group before and after contact at average wave and age of contact. Bold values in the Difference Column indicate 95% confidence intervals do not overlap with 0.")
+  group_by(weighted) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, weighted, nl2g_lev_tab_fun))
 
-nl2g_lev_tab
-
-save_kable(nl2g_lev_tab, file = sprintf("%s/results/tables/spline/twogroups_levels_tab.html", data_path))
+(nl2g_lev_tab %>% filter(weighted == "weighted"))$tab[[1]]
 ```
 
 
@@ -1928,8 +1906,8 @@ save_kable(nl2g_lev_tab, file = sprintf("%s/results/tables/spline/twogroups_leve
 levs <- paste(rep(traits$old, each = 2), rep(c("Level", "Diff"), times = 4), sep = "_")
 
 nl2g_slope <- nested.mods %>%
-  filter(weighted == "weighted" & groups != "threegroups" & mod == "spline") %>%
-  select(pred:groups, hypoth) %>%
+  filter(groups != "threegroups" & mod == "spline") %>%
+  select(pred:weighted, hypoth) %>%
   unnest(hypoth) %>%
   filter(grepl("Slope", term)) %>%
   mutate(term = str_replace_all(term, "Either", groups),
@@ -1944,42 +1922,46 @@ nl2g_slope <- nested.mods %>%
          groups = ifelse(Group == "Diff", "Diff", "Level"),
          term2 = ifelse(term == "Slope" & Group == "Neither", "None", term2),
          term2 = ifelse(Group == "Diff", ifelse(term == "PrePostSlope", "Pre", "None"), term2)) %>%
-  select(pred, model, groups, term2, est) %>%
+  select(weighted, pred, model, groups, term2, est) %>%
   pivot_wider(names_from = c("pred", "groups"),
               values_from = "est"
               , names_sep = "_") %>%
   mutate(model = forcats::fct_rev(factor(model)),
          term2 = factor(term2, c("None", "Pre", "Post"))) %>%
   arrange(model, term2) %>%
-  select(model, term2, levs)
+  select(weighted, model, term2, levs)
+
+nl2g_slope_tab_fun <- function(d, weight){
+  tab_num <- paste0("S", sup_tables)
+  cap <-sprintf("<strong>Table %s</strong><br><em>%s Estimated Estimated Slopes Across Groups at Average Contact Points and Differences Between Groups and Across Contact Points</em>", tab_num, str_to_title(weight))
+  tab <- d %>% 
+    select(-model) %>%
+    kable(., "html"
+          , escape = F
+          , col.names = c("Term", rep(c("Level<br><em>b</em> [CI]", "Difference<br><em>b</em> [CI]"), times = 4))
+          , align = c("r", rep("c", 8))
+          , caption = cap) %>%
+    kable_styling(full_width = F) %>%
+    kableExtra::group_rows("Incarceration", 1, 3) %>%
+    kableExtra::group_rows("Community Service", 4, 6) %>%
+    add_header_above(c(" " = 1, "Sensation Seeking" = 2, "Impulsivity" = 2, "Depressive Symptoms" = 2, 
+                       " Self-Esteem" = 2)) %>%
+    add_footnote(notation = "none"
+                 , label = "Note. None, Pre, and Post slopes indicate estimated average slopes in the no contact group (None) or before (Pre) and after (Post) contact in the contact groups. The Difference columns indicate estimated differences in average trajectories. The ''None'' row indicates the difference between the no contact and contact groups at the average age and wave of contact (i.e. post contact), while the ''Pre'' row indicates the difference in the contact group before and after contact at average wave and age of contact. Bold values in the Difference Column indicate 95% confidence intervals do not overlap with 0.")
+  
+  save_kable(tab, file = sprintf("%s/results/tables/Table_%s_wi_person_%s_slopes.html"
+                           , local_path, tab_num, weight))
+  sup_tables <<- sup_tables + 1
+  return(tab)
+}
 
 nl2g_slope_tab <- nl2g_slope %>%
-  select(-model) %>%
-  kable(., "html"
-        , escape = F
-        , col.names = c("Term", rep(c("Level<br><em>b</em> [CI]", "Difference<br><em>b</em> [CI]"), times = 4))
-        , align = c("r", rep("c", 8))
-        , caption = "<strong>Table X</strong><br><em>Estimated Slopes Across Groups at Average Contact Points and Differences Between Groups and Across Contact Points") %>%
-  kable_styling(full_width = F) %>%
-  kableExtra::group_rows("Incarceration", 1, 3) %>%
-  kableExtra::group_rows("Community Service", 4, 6) %>%
-  add_header_above(c(" " = 1, "Sensation Seeking" = 2, "Impulsivity" = 2, "Depressive Symptoms" = 2, 
-                     " Self-Esteem" = 2)) %>%
-  add_footnote(notation = "none"
-               , label = "Note. None, Pre, and Post slopes indicate estimated average slopes in the no contact group (None) or before (Pre) and after (Post) contact in the contact groups. The Difference columns indicate estimated differences in average trajectories. The ''None'' row indicates the difference between the no contact and contact groups at the average age and wave of contact (i.e. post contact), while the ''Pre'' row indicates the difference in the contact group before and after contact at average wave and age of contact. Bold values in the Difference Column indicate 95% confidence intervals do not overlap with 0.")
+  group_by(weighted) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, weighted, nl2g_lev_tab_fun))
 
-nl2g_slope_tab
-
-save_kable(nl2g_slope_tab, file = sprintf("%s/results/tables/spline/twogroups_slopes_tab.html", data_path))
-```
-
-```{r}
-nested.mods %>%
-  filter(mod == "spline" & weighted == "weighted") %>%
-  select(pred:weighted, pool) %>%
-  unnest(pool) %>%
-  filter(grepl("age", term)) %>%
-  arrange(term, pred, groups)
+(nl2g_slope_tab %>% filter(weighted == "weighted"))$tab[[1]]
 ```
 
 ## Results Plots  
@@ -1994,7 +1976,7 @@ traits <- tibble(
 )
 
 sig <- nested.mods %>% 
-  filter(mod == "linear" & weighted == "weighted") %>% 
+  filter(mod == "linear") %>% 
   unnest(pool) %>%
   filter(grepl(":", term)) %>%
   mutate(sig = ifelse(p < .05, "sig", "ns"),
@@ -2009,7 +1991,7 @@ sig <- nested.mods %>%
   ungroup() 
 
 raneff_slopes <- nested.mods %>% 
-  filter(weighted == "weighted" & mod == "linear") %>%
+  filter(mod == "linear") %>%
   select(pred, mod, weighted, pool_re) %>%
   unnest(pool_re) %>% 
   left_join(group_wide %>% select(PROC_CID, groups)) %>% 
@@ -2018,7 +2000,7 @@ raneff_slopes <- nested.mods %>%
          CommServ = ifelse(groups == "CommServ", 1, 0),
          linSlope = age0 + `age0:groupsJail`*Jail + `age0:groupsCommServ`*CommServ,
          Intercept = `(Intercept)` + groupsJail*Jail + groupsCommServ*CommServ) %>%
-  select(pred, PROC_CID, Intercept, linSlope, groups, mod) # cubSlope,
+  select(pred, weighted, PROC_CID, Intercept, linSlope, groups, mod) # cubSlope,
 
 raneff_slopes.p <- raneff_slopes %>%
   mutate(groups = as.character(groups)) %>%
@@ -2044,6 +2026,8 @@ slopes.p <- sig %>%
   mutate(pred = factor(mapvalues(pred, traits$old, traits$breaks), levels = traits$breaks)) %>%
   # mutate_at(vars(group, term), ~str_replace_all(., "Comm Serv", "Community Service")) %>%
   rename(b = Estimate)
+
+sup_figs <<- 7
 
 slopes_fun <- function(Pred){
   slopes.p <- slopes.p %>% filter(pred == Pred)
@@ -2079,7 +2063,8 @@ slopes_fun <- function(Pred){
     geom_label(data = slopes.p %>% filter(sig == "sig"), 
                aes(y = -.3, label = round(b,2)), fill = "blue", size = 4, color = "white") 
   }
-  ggsave(sprintf("%s/results/plots/%s_forest.png", data_path, Pred), width = width, height = 4)
+  ggsave(sprintf("%s/results/plots/Figure_S%s_%s_forest.png", local_path, sup_figs, Pred), width = width, height = 4)
+  sup_figs <<- sup_figs + 1
   p
 }
 
@@ -2101,13 +2086,13 @@ For example, the simple slopes for the *fixed effects* linear model can be defin
 We extract each of the coefficients from the pooled models and multiply them by the expanded model frame (all combinations of plausible levels of groups and age).  
 
 ```{r}
-load(sprintf("%s/results/psw_small.RData", data_path))
+load(sprintf("%s/results/psw_small.RData", local_path))
 
 fe <- 
   nested.mods %>% 
   select(pred:weighted, pool) %>%
   unnest(pool) %>%
-  filter(type == "fixeff" & weighted == "weighted" & mod == "linear")  %>%
+  filter(type == "fixeff" & mod == "linear")  %>%
   #select(mod, pred, term, Estimate) %>%
   mutate(term = gsub("\\(", "", term),
          term = gsub("\\)", "", term),term = gsub("\\^", "", term),
@@ -2115,9 +2100,9 @@ fe <-
          term = str_replace(term, "CommServ:age02", "age02:CommServ"),
          term = str_replace(term, "Jail:age02", "age02:Jail")) %>%
   arrange(pred, term) %>%
-  select(pred, term, Estimate) %>%
+  select(weighted, pred, term, Estimate) %>%
   spread(key = term, value = Estimate) %>%
-  select(pred, Intercept, order(colnames(.))) %>%
+  select(weighted, pred, Intercept, order(colnames(.))) %>%
   mutate_all(funs(ifelse(is.na(.), 0, .))) 
 
 means <- nested.psw %>% filter(match_set == "socialization") %>% 
@@ -2158,14 +2143,15 @@ comb_fun <- function(df, pv){
 }
 
 te <- fe_slopes %>%
-  group_by(pred) %>%
+  group_by(weighted, pred) %>%
   nest() %>%
+  ungroup() %>%
   full_join(
     nested.mods %>% 
-      filter(weighted == "weighted" & mod == "linear")  %>% 
-      select(pred, pooled_vcov)
+      filter(mod == "linear")  %>% 
+      select(weighted, pred, vcov)
     ) %>%
-  mutate(predvar = map2(data, pooled_vcov, pv_fun),
+  mutate(predvar = map2(data, vcov, pv_fun),
          data = map2(data, predvar, comb_fun)) %>%
   select(pred, data) %>%
   unnest(data)
@@ -2173,12 +2159,12 @@ te <- fe_slopes %>%
 fe_slopes$y <- rowSums((fe_slopes %>% select(Intercept:Jail)) * (fe_slopes %>% select(t.Intercept:t.groupsJail))) 
 
 fe_sigma <- nested.mods %>% 
-  filter(weighted == "weighted" & mod == "linear")  %>% 
+  filter(mod == "linear")  %>% 
   select(pred:weighted, pool) %>%
   unnest(pool) %>% 
-  filter(term == "\\hat{\\sigma^2}") %>% 
-  select(pred, Estimate) %>%
-  mutate(pred = mapvalues(pred, traits$old, traits$new))
+  filter(term == "sd_Observation.Residual") %>% 
+  select(weighted, pred, Estimate) %>%
+  mutate(Estimate = Estimate^2)
 
 fe_slopes <- fe_slopes %>%
   full_join(te) %>%
@@ -2186,21 +2172,22 @@ fe_slopes <- fe_slopes %>%
   mutate(groups = ifelse(t.groupsJail == 1, "Incarceration", 
                   ifelse(t.groupsCommServ == 1, "Community Service", "Neither")),
           pred = mapvalues(pred, traits$old, traits$new)) %>% 
-  select(pred, t.age0, groups, y, predvar, Estimate) 
+  select(weighted, pred, t.age0, groups, y, predvar, Estimate) 
 
 fe_slopes$SE <- sqrt(fe_slopes$predvar) 
 fe_slopes$SE2 <- sqrt(fe_slopes$predvar+fe_slopes$Estimate)
 
-fe_slopes <- unique(fe_slopes %>% select(pred, t.age0, groups, y, SE))
+fe_slopes <- unique(fe_slopes %>% select(weighted, pred, t.age0, groups, y, SE))
 range_act <- fe_slopes %>%
-  group_by(pred) %>%
+  group_by(weighted, pred) %>%
   summarize(y = list(
   range(range(y), range(t.age0)))) %>%
+  ungroup() %>%
   unnest(y) %>%
   mutate(t.age0 = y)
 
 range_act <- fe_slopes %>%
-  group_by(pred) %>%
+  group_by(pred, weighted) %>%
   summarize(min = min(y, na.rm=T) - .5, max = max(y, na.rm=T) + .5) %>%
   ungroup() %>%
   gather(key = est, value = y, min, max) %>%
@@ -2208,19 +2195,16 @@ range_act <- fe_slopes %>%
   mutate(pred = mapvalues(pred, traits$old, traits$new),
          pred = factor(pred, levels = traits$new))
 
-fe_slopes  %>%
-  filter(!is.na(groups)) %>%
-  group_by(pred) %>% mutate(z = as.numeric(scale(y))) %>%
-  ungroup() %>%
-  mutate(pred = factor(pred, levels = traits$new),
-         groups = factor(groups, levels = c("Neither", "Incarceration", "Community Service"))) %>%
-  ggplot(aes(x = t.age0*5+(14), y = y)) +
+bw_traj_fun <- function(d, weight){
+  sup_num <- if(weight == "weighted") 1 else paste0("S", sup_figs)
+  p <- d %>%
+    ggplot(aes(x = t.age0*5+(14), y = y)) +
     scale_x_continuous(limits = c(10,24), breaks = seq(10,24,4)) +
   scale_y_continuous(limits = c(0,2.5), breaks = seq(0,2,1)) +
     #geom_smooth(se = F, size = 1.2, span = .1) +
     geom_ribbon(aes(ymin=y-2*SE,ymax=y+2*SE, group = groups),alpha=0.15,fill="blue") +
     geom_line(aes(color = groups, group = groups),size = 1.2) + 
-    geom_blank(data = range_act) +
+    geom_blank(data = range_act %>% filter(weighted == weight)) +
     # geom_point(data = pred_dat , color = "black", aes(x = age, y = value)) +
     # geom_line(data = pred_dat %>% filter(item == Item), size = 1.2,
     #           aes(x = age, y = value, color = groups2, group = groups2), linetype = "dashed") +
@@ -2235,7 +2219,24 @@ fe_slopes  %>%
           legend.title = element_text(face = "bold", size = rel(1.2)),
           legend.position = "bottom",
           plot.title = element_text(face = "bold", size = rel(1.2), hjust = .5))
-ggsave(sprintf("%s/results/plots/ml_change.png", data_path), width = 8, height = 6)
+  ggsave(p, file = sprintf("%s/results/plots/Figure_%s_%s_bw_person_traj.png", local_path, sup_num, weight)
+         , width = 8, height = 6)
+  if(weight == "unweighted") sup_figs <<- sup_figs + 1
+  return(p)
+}
+
+bw_traj_plots <- fe_slopes  %>%
+  filter(!is.na(groups)) %>%
+  group_by(pred, weighted) %>% 
+  mutate(z = as.numeric(scale(y))) %>%
+  ungroup() %>%
+  mutate(pred = factor(pred, levels = traits$new),
+         groups = factor(groups, levels = c("Neither", "Incarceration", "Community Service"))) %>%
+  group_by(weighted) %>%
+  nest() %>%
+  ungroup() %>% 
+  mutate(p = map2(data, weighted, bw_traj_fun))
+  
 ```
 
 #### Non-Linear
@@ -2267,6 +2268,7 @@ plot_data_fun <- function(d, gr){
 }
 
 plot_save_fun <- function(d, weight){
+  sup_num <- if(weight == "weighted") 2 else paste0("S", sup_figs)
   p <- d  %>%
     ggplot(aes(x = wave0
                , y = y
@@ -2292,9 +2294,10 @@ plot_save_fun <- function(d, weight){
             , axis.text = element_text(face = "bold", size = rel(1), color = "black")
             , axis.title = element_text(face = "bold", size = rel(1.1)))
   ggsave(p
-       , file = sprintf("%s/results/plots/spline/%s_trajectories_none.png", data_path, weight)
+       , file = sprintf("%s/results/plots/Figure_%s_%s_wi_person_traj.png", local_path, sup_num, weight)
        , width = 10
        , height = 7)
+  if(weight == "unweighted") sup_figs <<- sup_figs + 1
   return(p)
 }
 
@@ -2326,12 +2329,12 @@ nl2g_plot$plot[[2]]
 
 ```{r soc REs, eval = T, fig.height=9, fig.width=6.5}
 grp.randeff <- nested.mods %>% 
-  filter(weighted == "weighted" & mod == "linear") %>%
-  select(pred:pooled_re, -groups) %>%
-  unnest(pooled_re) %>% 
+  filter(mod == "linear") %>%
+  select(weighted, pred:pool_re, -groups) %>%
+  unnest(pool_re) %>% 
   left_join(group_wide %>% select(PROC_CID, groups)) %>% 
   gather(key = term, value = value, `(Intercept)`:`age0:groupsCommServ`) %>%
-  group_by(groups, term, pred) %>%
+  group_by(groups, weighted, term, pred) %>%
   summarise(var = var(value, na.rm = T)) %>%
   ungroup() %>%
   spread(key = groups, value = var) %>%
@@ -2348,24 +2351,29 @@ n_subs <- sample(unique((group_wide %>% filter(groups == "None"))$PROC_CID),50)
 j_subs <- sample(unique((group_wide %>% filter(groups == "Jail"))$PROC_CID),50)
 c_subs <- sample(unique((group_wide %>% filter(groups == "CommServ"))$PROC_CID),50)
 
+raneff_plot_fun <- function(d, weighted){
+  d %>% 
+    filter(PROC_CID %in% c(n_subs, j_subs, c_subs)) %>%
+    ggplot(aes(x = age0*5+(14), y = y, group = PROC_CID, color = groups)) + 
+      scale_x_continuous(limits = c(10,24), breaks = seq(10,24,2)) +
+      # scale_color_manual(values = RColorBrewer::brewer.pal(9, "Blues")[c(1,5,9)])+
+      geom_line(size = .3, alpha = .25) + 
+      geom_line(data = fe_slopes, aes(x = t.age0*5+14, color = groups, group = groups),size = 1.2) + 
+      labs(x = "Age", y = "Predicted Rating", color = "Group") +
+      facet_wrap( ~ pred, scales = "free") +
+      theme_classic() + 
+      theme(axis.text = element_text(face = "bold", size = rel(1.2)),
+            axis.title = element_text(face = "bold", size = rel(1.2)),
+            strip.text = element_text(face = "bold", size = rel(1.2)),
+            legend.text = element_text(face = "bold"),
+            legend.title = element_text(face = "bold", size = rel(1.2)),
+            legend.position = "bottom"))
+ggsave(sprintf("%s/results/plots/Figure_%s_%s_raneff_change.png", local_path, sup_figs, weight), width = 6, height = 5)
+}
+
 (ind_plot <- raneff_pred %>%
   #filter(pred %in% c("SensSeek", "Impls")) %>%
-  filter(PROC_CID %in% c(n_subs, j_subs, c_subs)) %>%
-  ggplot(aes(x = age0*5+(14), y = y, group = PROC_CID, color = groups)) + 
-    scale_x_continuous(limits = c(10,24), breaks = seq(10,24,2)) +
-    # scale_color_manual(values = RColorBrewer::brewer.pal(9, "Blues")[c(1,5,9)])+
-    geom_line(size = .3, alpha = .25) + 
-    geom_line(data = fe_slopes, aes(x = t.age0*5+14, color = groups, group = groups),size = 1.2) + 
-    labs(x = "Age", y = "Predicted Rating", color = "Group") +
-    facet_wrap( ~ pred, scales = "free") +
-    theme_classic() + 
-    theme(axis.text = element_text(face = "bold", size = rel(1.2)),
-          axis.title = element_text(face = "bold", size = rel(1.2)),
-          strip.text = element_text(face = "bold", size = rel(1.2)),
-          legend.text = element_text(face = "bold"),
-          legend.title = element_text(face = "bold", size = rel(1.2)),
-          legend.position = "bottom"))
-ggsave(sprintf("%s/results/plots/raneff_change.png", data_path), width = 6, height = 5)
+  
 rm(nested.mods)
 ```
 
