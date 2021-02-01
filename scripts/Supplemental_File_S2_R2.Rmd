@@ -1162,11 +1162,17 @@ First, we look at the correlations between each of the 4 outcomes across ages.
 
 ```{r soc cors, results = 'asis', eval = T}
 r_fun <- function(df, Item){
-  tab <- df %>% 
+  df <- df %>% 
+    filter(age > 8 & age < 40) %>%
     select(PROC_CID, age, value) %>%
-    spread(age, value) %>%
+    spread(age, value) 
+  sds <- sapply(df %>% select(-PROC_CID), function(x) sd(x, na.rm = T)) %>% t() %>% t()
+  ms <- sapply(df %>% select(-PROC_CID), function(x) mean(x, na.rm = T)) %>% t() %>% t()
+  colnames(sds) <- "SD"; colnames(ms) <- "M"
+  tab <- df %>% 
     select(-PROC_CID) %>%
-    cor(., use = "pairwise") %>%
+    cor(., use = "pairwise")
+  tab <- cbind(tab, ms, sds) %>%
     kable(.
           , format = "html"
           , booktabs = T
@@ -1762,7 +1768,18 @@ sd_re <- nested.mods %>%
   group_by(pred, mod, groups, weighted) %>%
   summarize(sd_re = sd(`(Intercept)`, na.rm = T)) %>%
   ungroup() %>%
-  filter(complete.cases(.))
+  filter(complete.cases(.)) %>%
+  full_join(
+    pred_long %>%
+      filter(age0 == 0) %>%
+      full_join(group_wide %>% select(PROC_CID, Group = groups)) %>%
+      filter(Group == "None") %>%
+      group_by(item) %>%
+      summarize(sd_raw = sd(value, na.rm = T)) %>%
+      ungroup() %>%
+      filter(complete.cases(.)) %>%
+      rename(pred = item) 
+  ) 
 
 d <- nested.mods %>% 
   select(pred:weighted, pool) %>%
@@ -1770,7 +1787,8 @@ d <- nested.mods %>%
   filter(grepl(":", term) & !grepl(":age", term)) %>%
   # filter(weighted == "weighted") %>% 
   left_join(sd_re) %>%
-  mutate(d = Estimate/sd_re, 
+  mutate(d_re = Estimate/sd_re, 
+         d_raw = Estimate/sd_raw,
          term = ifelse(grepl("tv_gro", term), str_replace(term, "tv_group", groups), term),
          group = ifelse(grepl("ail", term), "Incarceration", "Comm Serv"), 
          group = ifelse(grepl("jailcomm", term), "Both", group),
@@ -1778,7 +1796,7 @@ d <- nested.mods %>%
          sig = ifelse(p < .05, "sig", "ns"), 
          gamma = sprintf("%.2f<br>[%.2f, %.2f]", Estimate, CI.lower, CI.upper),
          groups = ifelse(groups == "Jail", "Incarceration", groups)) %>%
-  select(weighted, pred, mod, d, gamma, groups, group, sig)
+  select(weighted, pred, mod, d_re, d_raw, groups, group, sig, gamma)
 
 levs <- c("Neither.b", "Neither.gamma", paste(rep(c("Incarceration", "Comm Serv"), each = 3), rep(c("b", "gamma", "d"), times = 2), sep = "."), "Both.b", "Both.gamma", "Both.d")
 
@@ -1787,42 +1805,31 @@ slopes.tab <- nested.mods %>%
   select(pred:weighted, hypoth) %>% 
   unnest(hypoth) %>%
   separate(term, c("group", "term"), sep = "_") %>%
-  # filter(weighted == "weighted") %>% 
+  # filter(weighted == "weightedd") %>% 
   filter(grepl("Slope", term)) %>%
   mutate(group = ifelse(group == "CommServ", "Comm Serv", group)) %>%
   # select(-groups) %>%
   left_join(d %>% filter(mod == "linear")) %>%
-  mutate_at(vars(Estimate:upr, d), funs(ifelse(!is.na(.) == T, sprintf("%.2f", .), ""))) %>%
-  mutate_at(vars(d, gamma), ~ifelse(sig == "sig", sprintf("<strong>%s</strong>", .), .)) %>%
+  mutate_at(vars(Estimate:upr, d_re, d_raw), funs(ifelse(!is.na(.) == T, sprintf("%.2f", .), ""))) %>%
+  mutate_at(vars(d_re, d_raw, gamma), ~ifelse(sig == "sig", sprintf("<strong>%s</strong>", .), .)) %>%
   mutate(#d = ifelse(sig == "sig", sprintf("<strong>%s</strong>", d), d),
          b = sprintf("%s<br>[%s, %s]", Estimate, lwr, upr)) %>%
-  select(weighted, pred, mod, groups, group, b, gamma, d) %>%
-  # rename(b = Estimate) %>%
-  gather(key = est, value = value, b, gamma, d, na.rm = T) %>%
-  unite(tmp, group, est, sep = ".") %>%
-  mutate(tmp = factor(tmp, levels = levs)) %>%
-  arrange(pred, tmp) %>%
-  pivot_wider(names_from = tmp, values_from = value)
+  select(weighted, pred, mod, groups, group, b, gamma, d_re, d_raw) %>%
+  pivot_longer(names_to = "d_type", values_to = "d", cols = c("d_re", "d_raw")) %>%
+  pivot_longer(cols = c(b, gamma, d), names_to = "est", values_to = "value", values_drop_na = T) %>%
+  pivot_wider(names_from = c("group", "est"), values_from = "value", names_sep = ".") %>%
+  arrange(weighted, pred) %>%
+  select(weighted:d_type, one_of(levs))
 ```
-
-```{r}
-nested.mods %>%
-  filter(mod == "linear") %>%
-  select(pred:weighted, pool) %>%
-  unnest(pool) %>%
-  filter(grepl("age0:", term)) %>%
-  mutate(est = sprintf("b = %.2f; 95%% CI [%.2f, %.2f]", Estimate, CI.lower, CI.upper),
-         sig = ifelse(sign(CI.lower) == sign(CI.upper), "sig", "ns")) %>%
-  select(pred, weighted, term, est, sig) %>%
-  arrange(weighted, pred)
-```
-
 
 ### Linear Slopes    
 ```{r}
-lin_tab_fun <- function(d, weight){
-  tab_num <- if(weight == "weighted") 2 else paste0("S", sup_tables)
+lin_tab_fun <- function(d, weight, d_type){
+  tab_num <- if(weight == "weighted" & d_type == "d_re") 2 else paste0("S", sup_tables)
   cap <-sprintf("<strong>Table %s</strong><br><em>%s Mean Personality Trait Change or Incarceration, Court-Ordered Community Service, and Neither Participants</em>", tab_num, str_to_title(weight))
+  re <- if( d_type == "d_raw") "raw values" else "random intercepts"
+  ftn <- sprintf("Note. The reference group was individuals neither in the Incarceration nor Court-Ordered Community Service groups. Cohen's d was calculated by dividing the difference in mean slope between groups by the standard deviation of the %s of personality scores at age 14. CI = confidence interval. Bolded values represent estimated mean differences in change between groups whose CIs do not overlap with 0.", re)
+  re <- if( d_type == "d_raw") "raw" else "random"
   tab <- d %>%
     select(-mod, -groups, -contains("Both")) %>%
     kable(.
@@ -1833,20 +1840,20 @@ lin_tab_fun <- function(d, weight){
           , caption = cap) %>% 
     kable_styling(full_width = F) %>%
     add_header_above(c(" " = 1, "Neither" = 1, "Incarceration" = 1, " " = 2, "Community Service" = 1, " " = 2)) %>%
-    add_footnote("Note. The reference group was individuals neither in the Incarceration nor Court-Ordered Community Service groups. Cohen's d is calculated by dividing the difference in mean slope between groups by the standard deviation of the random intercepts of personality scores at age 14. CI = confidence interval. Bolded values represent estimated mean differences in change between groups whose CIs do not overlap with 0.", notation = "none")
-  save_kable(tab, file = sprintf("%s/results/tables/Table_%s_linear_%s_slopes.html"
-                           , local_path, tab_num, weight))
-  if(weight == "unweighted") sup_tables <<- sup_tables + 1
+    add_footnote(ftn, notation = "none")
+  save_kable(tab, file = sprintf("%s/results/tables/Table_%s_bw_person_%s_%s_slopes.html"
+                           , local_path, tab_num, weight, re))
+  if(!(weight == "weighted" & d_type == "d_raw")) sup_tables <<- sup_tables + 1
   return(tab)
 }
 
 lin.tab <- slopes.tab  %>%
   mutate(pred = factor(pred, traits$old, traits$new)) %>%
   arrange(pred) %>%
-  group_by(weighted) %>%
+  group_by(weighted, d_type) %>%
   nest() %>%
   ungroup() %>%
-  mutate(tab = map2(data, weighted, lin_tab_fun))
+  mutate(tab = pmap(list(data, weighted, d_type), lin_tab_fun))
 ```
 
 ### Nonlinear Levels  
@@ -1971,10 +1978,101 @@ nl2g_slope_tab <- nl2g_slope %>%
   group_by(weighted) %>%
   nest() %>%
   ungroup() %>%
-  mutate(tab = map2(data, weighted, nl2g_lev_tab_fun))
+  mutate(tab = map2(data, weighted, nl2g_slope_tab_fun))
 
 (nl2g_slope_tab %>% filter(weighted == "weighted"))$tab[[1]]
 ```
+
+### Overall Random Effects  
+```{r}
+raneff_tab_fun <- function(d, mod){
+  tab_num <- paste0("S", sup_tables)
+  tab <- d %>% 
+    select(pred, groups, weighted, term, Estimate) %>%
+    mutate(term = str_remove_all(term, "sd_"),
+           term = str_remove_all(term, "[\\(\\)]"),
+           term = str_remove_all(term, ".PROC_CID"),
+           term = ifelse(term != "Intercept", "Slope", term),
+           pred = factor(pred, traits$old, traits$new)) %>%
+    arrange(pred) %>%
+    pivot_wider(names_from = c("weighted", "term")
+                , names_sep = "_"
+                , values_from = "Estimate") %>%
+    kable(. ,"html"
+          , escape = F
+          , digits = 2
+          , col.names = c("", "Groups", rep(c("Intercept", "Slope"), times = 2))
+          , align = c("r", "r", rep("c", 4))
+          , caption = sprintf("<strong>Table %s</strong><br><em>Random Intercepts and Slopes for %s Models", tab_num, str_to_title(mod))) %>%
+    kable_styling(full_width = F) %>%
+    add_header_above(c(" " = 2, "Unweighted" = 2, Weighted = 2))
+  save_kable(tab, file = sprintf("%s/results/tables/Table_%s_random_%s.html"
+                                 , local_path, tab_num, mod))
+  sup_tables <<- sup_tables + 1
+  return(tab)
+}
+
+raneff_tabs <- nested.mods %>% 
+  select(pred:pool) %>%
+  unnest(pool) %>%
+  filter(type == "raneff" & !grepl("Residual", term) & !grepl("cor_", term)) %>%
+  group_by(mod) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, mod, raneff_tab_fun))
+```
+
+```{r}
+## linear
+raneff_tabs$tab[[1]]
+## spline
+raneff_tabs$tab[[2]]
+```
+
+### Group Random Effects  
+```{r}
+cap <- sprintf("<strong>Table S%s</strong><br><em>Standard Deviations of Raw, Unweighted, and Weighted Baseline Personality Measures across Contact Groups</em>", sup_tables)
+re_gr_tab <- nested.mods %>% 
+  select(pred:weighted, pool_re) %>%
+  unnest(pool_re) %>%
+  full_join(group_wide %>% select(PROC_CID, Group = groups)) %>%
+  filter(mod == "linear") %>%
+  group_by(pred, mod, groups, Group, weighted) %>%
+  summarize(sd_re = sd(`(Intercept)`, na.rm = T)) %>%
+  ungroup() %>%
+  filter(complete.cases(.)) %>%
+  full_join(
+    pred_long %>%
+      filter(age0 == 0) %>%
+      full_join(group_wide %>% select(PROC_CID, Group = groups)) %>%
+      # filter(Group == "None") %>%
+      group_by(item, Group) %>%
+      summarize(sd_re = sd(value, na.rm = T)) %>%
+      ungroup() %>%
+      filter(complete.cases(.)) %>%
+      rename(pred = item) %>%
+      mutate(weighted = "raw")
+  ) %>%
+  select(pred, Group, weighted, sd_re) %>%
+  pivot_wider(names_from = c("weighted", "Group")
+              , names_sep = "_"
+              , values_from = "sd_re") %>%
+  select(pred, contains("raw"), contains("unweighted"), contains("weighted")) %>%
+  kable(., "html"
+        , escape = F
+        , digits = 2
+        , align = c("r", rep("c", 9))
+        , col.names = c("", rep(c("None", "Incarceration", "Community<br>Service"), times = 3))
+        , caption = ) %>%
+  kable_styling(full_width = F) %>%
+  add_header_above(c(" " = 1, "Raw Baseline Values" = 3, "Unweighted Random\nIntercepts" = 3, "Weighted Random\nIntercepts" = 3)) %>%
+  add_footnote("Raw baseline standard deviations were found by taking the standard deviation of the raw values for each characteristic at baseline (age 14) for each group. Standard deviations of unweighted and weighted random intercepts were calculated by extracting the random intercepts and taking their standard deviation in each group.")
+
+save_kable(re_gr_tab, file = sprintf("%s/results/tables/Table_S%s_Linear_Group_Random_Effects.html", local_path, sup_tables))
+sup_tables <<- sup_tables + 1
+re_gr_tab
+```
+
 
 ## Results Plots  
 ### Fixed Effects  
